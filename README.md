@@ -35,12 +35,14 @@ Apple II (AppleWin emulator) with the **Commander X16 VERA** expansion card.
 > （verasdedit 是一個 PC-Tools 風格的 6502 十六進位 sector editor，跑在
 > Apple II（AppleWin 模擬器）的 Commander X16 VERA 擴充卡上。）
 
-It reads any LBA sector of an SD card image directly over the VERA SD/MMC SPI
-(slot 2, `$C21E`/`$C21F`) and displays offset 0–511 as **hex + ASCII** in two
-pages (256 bytes / 16 rows each).
-> （它透過 VERA 的 SD/MMC SPI（slot 2，`$C21E`/`$C21F`）直接讀取 SD 卡影像的
-> 任一 LBA sector，以 **hex + ASCII** 兩欄顯示 offset 0–511 的內容——512 bytes
-> 分兩頁，每頁 256 bytes / 16 rows。）
+It reads any LBA sector of an SD card image directly over the VERA SD/MMC SPI.
+The VERA base is **auto-detected (slot 2 `$C200`, else slot 4 `$C400`)**; SPI
+data/status are `base+$1E`/`base+$1F` (`$C21E`/`$C21F` for slot 2). It displays
+offset 0–511 as **hex + ASCII** in two pages (256 bytes / 16 rows each).
+> （它透過 VERA 的 SD/MMC SPI 直接讀取 SD 卡影像的任一 LBA sector。VERA 基底
+> 會**自動偵測（Slot 2 `$C200`，否則 Slot 4 `$C400`）**；SPI data/status 為
+> `base+$1E`/`base+$1F`（Slot 2 是 `$C21E`/`$C21F`）。以 **hex + ASCII** 兩欄顯示
+> offset 0–511 的內容——512 bytes 分兩頁，每頁 256 bytes / 16 rows。）
 
 <a id="directory-contents"></a>
 ### Directory contents (git-tracked)
@@ -49,7 +51,7 @@ pages (256 bytes / 16 rows each).
 |------|-------------|
 | `verasdedit.asm` | 6502 assembly source (loads at `$2000`, ~3.1 KB) |
 | `verasdedit.mjs` | Build script (Node.js ESM): assembles `.asm` → packs a ProDOS disk |
-| `startup.bas` | Applesoft BASIC boot program (`BRUN VERASDEDIT.BIN`) |
+| `startup.bas` | Applesoft BASIC boot program: prints the banner, **detects the VERA card (slot 2 then slot 4)** via PEEK/POKE, then `BRUN VERASDEDIT.BIN`; halts with "No VERA Card Detected on Slot 2 or 4!" if neither slot has one |
 | `verasdedit.po` | **Prebuilt ProDOS disk image** (143360 bytes) — ready to use, **no rebuild needed** |
 | `asm6502.mjs` | **Dependency**: 6502 assembler (`assemble6502`), vendored |
 | `applebasic.mjs` | **Dependency**: Applesoft BASIC compiler (`compileApplesoftBasic`), vendored |
@@ -95,8 +97,8 @@ Successful output:
 
 ```
 Created ...\verasdedit.po (143360 bytes)
-  VERASDEDIT.BIN: 3588 bytes (load $2000)
-  STARTUP: 174 bytes
+  VERASDEDIT.BIN: 3848 bytes (load $2000)
+  STARTUP: 783 bytes
 ```
 
 Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
@@ -104,14 +106,17 @@ Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
 <a id="usage"></a>
 ### Usage (AppleWin)
 
-1. Start AppleWin, install the **VERA card in Slot 2**, and mount an **SD card
-   image** via the VERA card's "Configure..." dialog.
+1. Start AppleWin, install the **VERA card in Slot 2 or Slot 4**, and mount an
+   **SD card image** via the VERA card's "Configure..." dialog.
 2. **If a hard disk is configured in Slot 7**, it boots first and the editor
    won't appear. Clear `Slot 7 → Last Harddisk Image 1` in the registry
    (`HKCU\...\Configuration\Slot 7`) before booting.
 3. Boot `verasdedit.po` as the disk (`-d1` on the command line, or mount via
    GUI then reset).
-4. It auto-runs `BRUN VERASDEDIT.BIN` and reads LBA `800` (FAT32 boot sector):
+4. `startup.bas` prints the banner, **detects the VERA card (slot 2 then slot
+   4)** via PEEK/POKE, then `BRUN`s the editor (if neither slot has one it prints
+   `No VERA Card Detected on Slot 2 or 4!` and ends). The editor re-detects the
+   slot itself and reads LBA `800` (FAT32 boot sector):
 
 ```
 VeraSDEdit (Hex Sector Editor) by anomixer 2026
@@ -132,7 +137,7 @@ Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 | `R` | Reload current LBA |
 | `L` | **Select LBA** — type 1–8 hex digits + `RETURN` to load, `DEL` backspace, `ESC` cancel back to the editor |
 | `E` | Enter **editor** mode (see below) |
-| `Q` | Return to ProDOS (BYE/RTS, restores IRQ vector) |
+| `Q` | Return to ProDOS (BYE/RTS): restores ZP + IRQ vector, switches to 40-col, **HOME-clears the screen**, then returns |
 
 > Command keys accept **both cases** (`N`/`n`, `P`/`p`, `R`/`r`, `L`/`l`,
 > `E`/`e`, `Q`/`q`, and in the editor `I`/`i`, `J`/`j`, `K`/`k`, `M`/`m`).
@@ -189,7 +194,8 @@ The editor has two states:
 > on entering edit mode.
 >
 > `Q` returns to ProDOS via the `BYE`/RTS convention (the BRUN return address),
-> *not* the Applesoft warm-start `$3D2`.
+> *not* the Applesoft warm-start `$3D2`. It restores the ZP/IRQ vector, switches
+> to 40-col, and **HOME-clears the screen** so the `]` prompt is on a clean line.
 
 * `W` writes **all 512 bytes** of the current sector (both pages) back via
   CMD24 (WRITE_SINGLE_BLOCK) — the guest sends the token `0xFE` + 512 data
@@ -248,7 +254,7 @@ The vendored `asm6502.mjs` includes three fixes you must keep if you ever replac
 |------|------|
 | `verasdedit.asm` | 6502 組合語言原始碼（載入 `$2000`，約 3.1 KB） |
 | `verasdedit.mjs` | 建置腳本（Node.js ESM）：組譯 `.asm` → 包 ProDOS 磁片 |
-| `startup.bas` | Applesoft BASIC 啟動程式（開機後 `BRUN VERASDEDIT.BIN`） |
+| `startup.bas` | Applesoft BASIC 啟動程式：印 banner、**用 PEEK/POKE 偵測 VERA 卡（先 Slot 2 再 Slot 4）**，偵測到才 `BRUN VERASDEDIT.BIN`；兩槽都沒有就印 `No VERA Card Detected on Slot 2 or 4!` 並結束 |
 | `verasdedit.po` | **已建置好的 ProDOS 磁片影像**（143360 bytes）——直接可用，**不必重建** |
 | `asm6502.mjs` | **依賴**：6502 組譯器（`assemble6502`），已 vendored |
 | `applebasic.mjs` | **依賴**：Applesoft BASIC 編譯器（`compileApplesoftBasic`），已 vendored |
@@ -293,8 +299,8 @@ node verasdedit.mjs
 
 ```
 Created ...\verasdedit.po (143360 bytes)
-  VERASDEDIT.BIN: 3588 bytes (load $2000)
-  STARTUP: 174 bytes
+  VERASDEDIT.BIN: 3848 bytes (load $2000)
+  STARTUP: 783 bytes
 ```
 
 把 `verasdedit.po` 複製到 `Release\` 並在 AppleWin 開機。
@@ -302,11 +308,13 @@ Created ...\verasdedit.po (143360 bytes)
 <a id="cn-usage"></a>
 ### 使用方式（AppleWin）
 
-1. 啟動 AppleWin，安裝 **VERA 卡到 Slot 2**，並在 VERA 卡的「Configure...」裡選好 **SD 卡影像**。
+1. 啟動 AppleWin，安裝 **VERA 卡到 Slot 2 或 Slot 4**，並在 VERA 卡的「Configure...」裡選好 **SD 卡影像**。
 2. **若 Slot 7 有設硬碟**，它會先開機，editor 不會出現——開機前先清掉
    `HKCU\...\Configuration\Slot 7` 的 `Last Harddisk Image 1`。
 3. 把 `verasdedit.po` 當磁片開機（`-d1` 指定，或 GUI 掛載後 reset）。
-4. 開機後自動 `BRUN VERASDEDIT.BIN`，讀取 LBA `800`（FAT32 boot sector）：
+4. `startup.bas` 印 banner、**用 PEEK/POKE 偵測 VERA 卡（先 Slot 2 再 Slot 4）**，
+   偵測到才 `BRUN` editor（兩槽都沒有就印 `No VERA Card Detected on Slot 2 or 4!`
+   並結束）。editor 再自己偵測一次 slot，讀取 LBA `800`（FAT32 boot sector）：
 
 ```
 VeraSDEdit (Hex Sector Editor) by anomixer 2026
@@ -327,7 +335,7 @@ Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 | `R` | 重新載入目前 LBA |
 | `L` | **選擇 LBA**——輸入 1–8 個 hex digit + `RETURN` 載入，`DEL` 退格，`ESC` 取消回 editor |
 | `E` | 進入**編輯模式**（見下） |
-| `Q` | 回 ProDOS（BYE/RTS，先還原 IRQ vector） |
+| `Q` | 回 ProDOS（BYE/RTS：還原 ZP + IRQ vector、切回 40 欄、**先 HOME 清屏**再回） |
 
 > 指令鍵**大小寫皆可用**（`N`/`n`、`P`/`p`、`R`/`r`、`L`/`l`、`E`/`e`、
 > `Q`/`q`，編輯器內 `I`/`i`、`J`/`j`、`K`/`k`、`M`/`m`）。只有編輯器**資料輸入**
@@ -369,7 +377,8 @@ nibble 閃爍、ASCII 欄游標字元閃爍，即使該 byte 已改過（反白�
 > 進入編輯模式時游標從左邊（high）nibble 開始。
 >
 > `Q` 以 ProDOS `BYE`/RTS 慣例（BRUN 的回傳位址）回 ProDOS，**不是**
-> Applesoft warm-start `$3D2`。
+> Applesoft warm-start `$3D2`。會先還原 ZP/IRQ vector、切回 40 欄，並
+> **HOME 清屏**，讓 `]` 提示符出現在乾淨畫面。
 
 * `W` 透過 CMD24（WRITE_SINGLE_BLOCK）把目前 sector 的**全部 512 bytes**
   （兩頁）寫回——guest 送 token `0xFE` + 512 bytes data + 2 bytes CRC。

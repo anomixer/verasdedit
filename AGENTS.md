@@ -14,10 +14,12 @@ hard-won debugging lessons so future work doesn't re-trace the same mistakes.
 ## What this is
 
 - A 6502 hex sector editor that reads **any LBA** of an SD card image directly
-  over the **VERA SD/MMC SPI** (slot 2, `$C21E`/`$C21F`).
+  over the **VERA SD/MMC SPI**. The VERA base is **auto-detected (slot 2
+  `$C200`, else slot 4 `$C400`)** at entry; SPI data/status are then `base+$1E` /
+  `base+$1F`.
 - Displays offset 0–511 as **hex + ASCII** in two pages (256 bytes / 16 rows).
-- Runs on the Apple II (AppleWin) with the VERA card in slot 2, plus a mounted
-  SD card image.
+- Runs on the Apple II (AppleWin) with the VERA card in **slot 2 or slot 4**,
+  plus a mounted SD card image.
 - Also has an **editor mode** (`E`) that writes a sector back via CMD24.
 - Ships as a ready-to-boot **ProDOS disk image** (`verasdedit.po`, 143360 bytes).
 
@@ -27,7 +29,7 @@ hard-won debugging lessons so future work doesn't re-trace the same mistakes.
 |------|-------------|
 | `verasdedit.asm` | 6502 assembly source (loads at `$2000`, ~3.1 KB) |
 | `verasdedit.mjs` | Build script (Node.js ESM): assembles `.asm` → packs a ProDOS disk |
-| `startup.bas` | Applesoft BASIC boot program (`BRUN VERASDEDIT.BIN`) |
+| `startup.bas` | Applesoft BASIC boot program: prints the banner, **detects the VERA card (slot 2 then slot 4)** via PEEK/POKE, then `BRUN VERASDEDIT.BIN`; halts with "No VERA Card Detected on Slot 2 or 4!" if neither slot has one |
 | `asm6502.mjs` | **Dependency**: 6502 assembler (`assemble6502`), vendored |
 | `applebasic.mjs` | **Dependency**: Applesoft BASIC compiler, vendored |
 | `build.bat` | One-click build script (Windows): `node verasdedit.mjs` |
@@ -54,16 +56,16 @@ Successful output (current sizes):
 
 ```
 Created ...\verasdedit.po (143360 bytes)
-  VERASDEDIT.BIN: 3588 bytes (load $2000)
-  STARTUP: 174 bytes
+  VERASDEDIT.BIN: 3848 bytes (load $2000)
+  STARTUP: 783 bytes
 ```
 
 Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
 
 ## Running it (AppleWin)
 
-1. Install the **VERA card in Slot 2**, mount an SD card image via the VERA
-   card's "Configure..." dialog.
+1. Install the **VERA card in Slot 2 or Slot 4**, mount an SD card image via
+   the VERA card's "Configure..." dialog.
 2. **Boot order gotcha**: if a hard disk is configured in Slot 7 (registry
    `Slot 7\Last Harddisk Image 1`, commonly `x16-hero-vera.hdv`), it boots first
    and the editor never appears. Clear that registry value before launching:
@@ -71,7 +73,10 @@ Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
    reg delete "HKCU\Software\AppleWin\Configuration\Slot 7" /v "Last Harddisk Image 1" /f
    ```
    then boot with `-d1 verasdedit.po -power-on -m`.
-3. It auto-runs `BRUN VERASDEDIT.BIN` and reads LBA `800` (FAT32 boot sector).
+3. `startup.bas` prints the banner, **detects the VERA card (slot 2 then slot
+   4)** via PEEK/POKE, then `BRUN`s the editor. If neither slot has a VERA card
+   it prints `No VERA Card Detected on Slot 2 or 4!` and ends. The editor then
+   re-detects the slot itself and reads LBA `800` (FAT32 boot sector).
 
 ## Keys
 
@@ -82,7 +87,7 @@ Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
 | `R` | Reload current LBA |
 | `L` | Select LBA — type 1–8 hex digits + `RETURN` to load, `DEL` backspace, `ESC` cancel |
 | `E` | Enter editor mode |
-| `Q` | Return to ProDOS (BYE/RTS, restores IRQ vector) |
+| `Q` | Return to ProDOS (BYE/RTS): restores ZP + IRQ vector, switches to 40-col, **HOME-clears the screen**, then returns |
 
 > Command keys accept **both cases** (`N`/`n`, `P`/`p`, `R`/`r`, `L`/`l`,
 > `E`/`e`, `Q`/`q`, and in the editor `I`/`i`, `J`/`j`, `K`/`k`, `M`/`m`) — the
@@ -117,12 +122,15 @@ navigate state — in edit state it's a printable char typed as data (the
 
 The navigate banner shows `[W]=write`; the edit banner shows no `W` hint. `Q`
 returns to ProDOS via the `BYE`/RTS convention (the BRUN return address), not
-the Applesoft warm-start `$3D2`; the saved IRQ vector is restored first.
+the Applesoft warm-start `$3D2`. `QUIT` restores ZP `$50-$81` (saved at entry
+to `ZPBACKUP` at `$3200`), restores the IRQ vector, switches to 40-col, forces
+`RAMWRTOFF` and calls ROM `HOME` (`$FC58`) so the `]` prompt lands on a clear
+screen.
 
 Edited bytes show **inverse**, the cursor cell **flashes** — `PUTCH` supports
 three display modes (`ZP_DISPMODE`: 0=normal `|0x80`, 1=inverse `&0x3F`,
 2=flash `&0x3F|0x40`; the 80-col flash bit is bit6 with bit7 clear). A 32-byte
-dirty bitmap (`$2F00`, 1 bit per byte) tracks edits; `W` clears it.
+dirty bitmap (`$2F40`, 1 bit per byte) tracks edits; `W` clears it.
 
 A **changed byte shows inverse** (both nibbles) until written — and a byte only
 counts as changed if its value actually differs from the **original** (the
@@ -172,8 +180,9 @@ mode.
    added. When SCRATCH was `$2E00` and the program grew to 3587 bytes
    (`$2000`–`$2E02`), `DRAW_DATA`'s `STA SCRATCH,Y` overwrote the trailing
    `JMP EDIT_LOOP` with sector data → the guest executed garbage and hit a `BRK`
-   at `$2E02` after any byte edit. SCRATCH is now `$2E20`. **If you add code,
-   re-check that the code end (`load + length`) stays below `SCRATCH`.**
+   at `$2E02` after any byte edit. SCRATCH is now `$2F20` (code ends ~`$2F08`);
+   DIRTYMAP is `$2F40`, ZPBACKUP `$3200`. **If you add code, re-check that the
+   code end (`load + length`) stays below `SCRATCH`.**
 4. **Subroutine A-clobber pitfall.** `HEX_DISPMODE`/`ASCII_DISPMODE` use A as a
    temp and clobber the byte being printed; reload the buffer byte after calling
    them, or the hex column shows garbage.
@@ -198,6 +207,23 @@ mode.
    write `AND/ORA/EOR label,Y` (invalid 6502); use indexed-`X` or compute the
    mask by shifting. Verified by disassembling the binary: `AND BIT_TABLE,Y`
    had become `2D 00 00` (`AND $0000`), now `AND $5A`.
+7. **`SPI_READ_A` must read the SPI DATA register, not STATUS — slot-4 SD read
+   failures.** The original `SPI_READ_A` did `LDA VERA_SPI_ST` (STATUS) after
+   writing `$FF` to the data register, so it returned the *status* byte, not the
+   shifted-in SD byte — reads came back wrong (the guest reported "SD Read
+   failed!" even on a valid card, and slot 4 never worked). **Fixed**: write
+   `$FF` to the SPI DATA register and read the byte back from **DATA**
+   (`LDY #$00; LDA (ZP_SPIDATLO),Y`), polling STATUS only in `SPI_WAIT`. The SPI
+   registers are addressed dynamically via `ZP_SPIDATLO/HI` = base+`$1E` and
+   `ZP_SPISTLO/HI` = base+`$1F` (slot 2 `$C21E`, slot 4 `$C41E`).
+8. **Quit-to-ProDOS needs ZP restore + a forced bank before ROM `HOME`.** After
+   the BRUN `RTS`, ProDOS/Applesoft resumes startup.bas, but the program leaves
+   ZP `$50-$81` clobbered — that alone can crash the return. `QUIT` now
+   restores ZP `$50-$81` from `ZPBACKUP` (`$3200`, saved at entry) and restores
+   the IRQ vector before returning. The screen-clear also failed on `SD read
+   failed` (the error path left the RAMWRT/RAMRD soft-switches on AUX), so `QUIT`
+   must `STA RAMWRTOFF` (write MAIN) *before* `JSR $FC58` (ROM HOME) — otherwise
+   HOME clears the wrong bank and the `]` prompt is buried in old text.
 
 ## 80-column display model (Apple IIe)
 

@@ -59,10 +59,17 @@ ZP_EDITING   = $78            ; editor: 0=navigate (IJKM moves), 1=edit (keys mo
 ZP_IRQLO     = $79            ; saved IRQ vector lo (restored on QUIT)
 ZP_IRQHI     = $7A            ; saved IRQ vector hi
 ZP_NIBPOS    = $7B            ; which hex nibble is being displayed: 0=high 1=low
+ZP_VERALO    = $7C            ; detected VERA base (low byte, always $00)
+ZP_VERAHI    = $7D            ; detected VERA base (high byte: $C2=slot 2, $C4=slot 4)
+ZP_SPIDATLO  = $7E            ; VERA SPI DATA register address (low)
+ZP_SPIDATHI  = $7F            ; VERA SPI DATA register address (high)
+ZP_SPISTLO   = $80            ; VERA SPI STATUS register address (low)
+ZP_SPISTHI   = $81            ; VERA SPI STATUS register address (high)
 
-SCRATCH      = $2E20          ; 16-byte scratch for the ASCII column (must stay above the code, which ends ~$2E02)
-DIRTYMAP     = $2F00          ; 32-byte dirty bitmap (1 bit per byte 0-255)
+SCRATCH      = $2F20          ; 16-byte scratch for the ASCII column (must stay above the code; moved up for room)
+DIRTYMAP     = $2F40          ; 32-byte dirty bitmap (1 bit per byte 0-255)
 ORIGBUF      = $3400          ; 512-byte pristine copy of the loaded sector (original values)
+ZPBACKUP     = $3200          ; 50-byte backup of ZP $50-$81, restored on QUIT so ProDOS/BASIC survive
 
 ; VERA card registers (Slot 2: $C200-$C2FF)
 VERA_ADDR_L  = $C200
@@ -87,6 +94,7 @@ HIRESOFF     = $C056
 HIRESON      = $C057
 KBD          = $C000
 KBDSTRB      = $C010
+HOME_ROM     = $FC58          ; Apple IIe ROM HOME: clear 40-col screen + home cursor
 
 ; ---------------------------------------------------------------------------
 ; Entry
@@ -94,9 +102,9 @@ KBDSTRB      = $C010
 START:
     ; Disable interrupts (avoid VERA/ProDOS IRQ interference)
     SEI
-    ; Disable VERA interrupts (IEN=0)
-    LDA #$00
-    STA VERA_IEN
+    ; Save ZP $50-$81 (ProDOS/Applesoft work area) so QUIT can restore it —
+    ; otherwise the RTS back to ProDOS lands in clobbered zero-page and crashes.
+    JSR SAVE_ZP
     ; Save the IRQ vector, then set it to RTI (avoid VERA/ProDOS IRQ
     ; jumping to ROM BRK). QUIT restores it before returning to ProDOS.
     LDA $FFFE
@@ -114,12 +122,22 @@ START:
     STA $C000                ; 80STOREOFF
     STA $C054                ; PAGE2OFF -> display PAGE1
     STA ZP_SCRATCH           ; column 0
-    STA VERA_DC_VID          ; disable VERA video -> show Apple II text
     ; Start on page 0 of the sector
     LDA #$00
     STA ZP_PAGE
     JSR CLEAR_SCREEN
     JSR SET_CURSOR_HOME
+
+    ; Detect the VERA card: slot 2 first, else slot 4. If neither slot has
+    ; one, prints "No VERA Card Detected on Slot 2 or 4!" and halts.
+    ; On success ZP_VERALO/HI holds the detected base ($C200 or $C400).
+    JSR DETECT_SLOTS
+
+    ; Disable VERA interrupts + video on the detected slot, then set up the
+    ; SPI register pointers. (Detection may have reset the VERA, so these
+    ; are applied after detection.)
+    JSR VERA_DISABLE_IRQ_VID
+    JSR SETUP_SPI_PTRS
 
     ; Default LBA = 2048 ($00000800, FAT32 boot sector)
     LDA #$00
@@ -149,6 +167,29 @@ START:
     JMP MAIN_LOOP
 NOIRQ:
     RTI
+
+; ---------------------------------------------------------------------------
+; Save ZP $50-$81 (ProDOS/Applesoft work area) to ZPBACKUP, so QUIT can restore
+; it before the RTS back to ProDOS. Must be called before the program uses ZP.
+; ---------------------------------------------------------------------------
+SAVE_ZP:
+    LDX #$31                ; save $50..$81 (50 bytes)
+SV_LOOP:
+    LDA $50, X
+    STA ZPBACKUP, X
+    DEX
+    BPL SV_LOOP
+    RTS
+
+; Restore ZP $50-$81 from ZPBACKUP (called by QUIT).
+RESTORE_ZP:
+    LDX #$31
+RS_LOOP:
+    LDA ZPBACKUP, X
+    STA $50, X
+    DEX
+    BPL RS_LOOP
+    RTS
 
 ; ---------------------------------------------------------------------------
 ; Load current LBA and display it (resets to page 0)
@@ -397,21 +438,135 @@ GOTO_ROW:
 ; SD SPI: send byte (A) -> SPI DATA, wait
 ; ---------------------------------------------------------------------------
 SPI_SEND_A:
-    STA VERA_SPI_DAT
+    LDY #$00
+    STA (ZP_SPIDATLO),Y
     JSR SPI_WAIT
     RTS
 
 SPI_READ_A:
+    LDY #$00
     LDA #$FF
-    STA VERA_SPI_DAT
+    STA (ZP_SPIDATLO),Y
     JSR SPI_WAIT
-    LDA VERA_SPI_DAT
+    LDY #$00
+    LDA (ZP_SPIDATLO),Y
     RTS
 
 SPI_WAIT:
-    LDA VERA_SPI_ST
+    LDY #$00
+SW_LOOP:
+    LDA (ZP_SPISTLO),Y
     AND #$80
-    BNE SPI_WAIT
+    BNE SW_LOOP
+    RTS
+
+; ---------------------------------------------------------------------------
+; Detect the VERA card: slot 2 first, then slot 4. On success, sets
+; ZP_VERALO/HI to the detected base ($C200 or $C400). If neither slot has a
+; VERA card, prints "No VERA Card Detected on Slot 2 or 4!" and halts.
+; ---------------------------------------------------------------------------
+DETECT_SLOTS:
+    ; Try slot 2
+    LDA #$C2
+    STA ZP_VERAHI
+    LDA #$00
+    STA ZP_VERALO
+    JSR DETECT_VERA
+    BCS DS_DONE              ; found in slot 2
+    ; Try slot 4
+    LDA #$C4
+    STA ZP_VERAHI
+    LDA #$00
+    STA ZP_VERALO
+    JSR DETECT_VERA
+    BCS DS_DONE              ; found in slot 4
+    ; Neither slot has a VERA card: show the message and stop.
+    JSR PRINT_NO_VERA
+DS_HALT:
+    JMP DS_HALT
+DS_DONE:
+    RTS
+
+; ---------------------------------------------------------------------------
+; Probe the VERA at base ZP_VERALO/HI. Returns C=1 if present, C=0 if not.
+; Mirrors veratest's detection: CTRL write/read, then ADDR + DATA0 write/read.
+; ---------------------------------------------------------------------------
+DETECT_VERA:
+    LDA ZP_VERALO
+    STA ZP_PTR
+    LDA ZP_VERAHI
+    STA ZP_PTRHI
+    ; CTRL (offset $05): write 1, must read back 1
+    LDY #$05
+    LDA #$01
+    STA (ZP_PTR),Y
+    LDA (ZP_PTR),Y
+    CMP #$01
+    BNE DV_FAIL
+    ; CTRL: write 0, must read back 0
+    LDA #$00
+    STA (ZP_PTR),Y
+    LDA (ZP_PTR),Y
+    BNE DV_FAIL
+    ; ADDR_L/M/H = 0,0,0 ; then DATA0 (offset $03) write/read test
+    LDY #$00
+    LDA #$00
+    STA (ZP_PTR),Y          ; ADDR_L
+    INY
+    STA (ZP_PTR),Y          ; ADDR_M
+    INY
+    STA (ZP_PTR),Y          ; ADDR_H
+    INY                     ; Y = $03 = DATA0
+    LDA #$DE
+    STA (ZP_PTR),Y
+    LDA (ZP_PTR),Y
+    CMP #$DE
+    BNE DV_FAIL
+    LDA #$6F
+    STA (ZP_PTR),Y
+    LDA (ZP_PTR),Y
+    CMP #$6F
+    BNE DV_FAIL
+    SEC
+    RTS
+DV_FAIL:
+    CLC
+    RTS
+
+; ---------------------------------------------------------------------------
+; Disable VERA interrupts (IEN=0) and VERA video (DC_VID=0) on the detected
+; slot. Called after detection because detection may have reset the VERA.
+; ---------------------------------------------------------------------------
+VERA_DISABLE_IRQ_VID:
+    LDA ZP_VERALO
+    STA ZP_PTR
+    LDA ZP_VERAHI
+    STA ZP_PTRHI
+    LDY #$06
+    LDA #$00
+    STA (ZP_PTR),Y          ; IEN
+    LDY #$09
+    STA (ZP_PTR),Y          ; DC_VID
+    RTS
+
+; ---------------------------------------------------------------------------
+; Set ZP_SPIDAT = base+$1E (SPI data) and ZP_SPIST = base+$1F (SPI status).
+; ---------------------------------------------------------------------------
+SETUP_SPI_PTRS:
+    CLC
+    LDA ZP_VERALO
+    ADC #$1E
+    STA ZP_SPIDATLO
+    LDA ZP_VERAHI
+    ADC #$00
+    STA ZP_SPIDATHI
+    CLC
+    LDA ZP_VERALO
+    ADC #$1F
+    STA ZP_SPISTLO
+    LDA ZP_VERAHI
+    ADC #$00
+    STA ZP_SPISTHI
     RTS
 
 ; ---------------------------------------------------------------------------
@@ -419,7 +574,8 @@ SPI_WAIT:
 ; ---------------------------------------------------------------------------
 SD_INIT:
     LDA #$01
-    STA VERA_SPI_ST
+    LDY #$00
+    STA (ZP_SPISTLO),Y
     ; CMD0: 40 00 00 00 00 95
     LDA #$40
     JSR SPI_SEND_A
@@ -1028,6 +1184,9 @@ MSG_SAVED:
 MSG_WFAIL:
     ASC "SD Write failed!"
     !BYTE 0
+MSG_NO_VERA:
+    ASC "No VERA Card Detected on Slot 2 or 4!"
+    !BYTE 0
 
 ; ---------------------------------------------------------------------------
 ; String-printing wrappers
@@ -1113,6 +1272,13 @@ PRINT_MSG_WFAIL:
     LDA #<MSG_WFAIL
     STA ZP_PTR
     LDA #>MSG_WFAIL
+    STA ZP_PTRHI
+    JSR PRINT_STRING
+    RTS
+PRINT_NO_VERA:
+    LDA #<MSG_NO_VERA
+    STA ZP_PTR
+    LDA #>MSG_NO_VERA
     STA ZP_PTRHI
     JSR PRINT_STRING
     RTS
@@ -1244,7 +1410,7 @@ LBS_NOT_ESC:
 ; hands control back to ProDOS. Restore the IRQ vector and 40-col first.
 ; ---------------------------------------------------------------------------
 QUIT:
-    CLI                     ; re-enable interrupts (we SEI'd at entry)
+    JSR RESTORE_ZP          ; restore ZP $50-$81 before returning to ProDOS
     LDA ZP_IRQLO
     STA $FFFE               ; restore the saved IRQ vector
     LDA ZP_IRQHI
@@ -1252,6 +1418,10 @@ QUIT:
     LDA #$00
     STA TEXTON              ; text mode (already on, keep it)
     STA $C00C               ; 80COLOFF -> 40-col so the ProDOS prompt is legible
+    LDA #$00
+    STA RAMWRTOFF           ; write MAIN so HOME clears the visible text page
+    JSR HOME_ROM            ; clear the screen so the ']' prompt is on a clean screen
+    CLI                     ; re-enable interrupts (we SEI'd at entry)
     RTS                     ; return to ProDOS (BRUN caller)
 
 ; =============================================================================
