@@ -137,7 +137,7 @@ Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 | Key | Action |
 |-----|--------|
 | `SPACE` | Toggle page (PAGE 1 ↔ PAGE 2) |
-| `N` | Next LBA (LBA+1) |
+| `N` | Next LBA (LBA+1; from the last sector it wraps to 0) |
 | `P` | Previous LBA (LBA−1; from 0 it wraps to the last sector, Total−1) |
 | `R` | Reload current LBA |
 | `L` | **Select LBA** — type 1–8 hex digits + `RETURN` to load, `DEL` backspace, `ESC` cancel back to the editor |
@@ -340,7 +340,7 @@ Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 | 按鍵 | 功能 |
 |------|------|
 | `SPACE` | 換頁（PAGE 1 ↔ PAGE 2） |
-| `N` | 下一個 LBA（LBA+1） |
+| `N` | 下一個 LBA（LBA+1；在最後一顆磁區時繞回 0） |
 | `P` | 上一個 LBA（LBA−1；在 0 時繞回最後一顆磁區 Total−1） |
 | `R` | 重新載入目前 LBA |
 | `L` | **選擇 LBA**——輸入 1–8 個 hex digit + `RETURN` 載入，`DEL` 退格，`ESC` 取消回 editor |

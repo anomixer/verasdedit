@@ -74,6 +74,7 @@ TOTBUFF      = $3330          ; 4 bytes: total sector count (32-bit, LSB..MSB) f
 CSDLO        = $3334          ; CMD9 CSD c_size low byte  (total sectors = (c_size+1)*1024)
 CSDMD        = $3335          ; CMD9 CSD c_size mid byte
 CSDHI        = $3336          ; CMD9 CSD c_size high byte (top 6 bits)
+NEXTTMP      = $3337          ; 4-byte scratch: Total-1 (last sector) for NEXT_LBA wrap check
 SECTOR0      = $3600          ; sector buffer page 0 (bytes 0-255) — moved up so the code
 SECTOR1      = $3700          ; can grow past $3000 without overwriting sector data (page 1, bytes 256-511)
 
@@ -1281,6 +1282,50 @@ PREV_DEC:
     JSR DEC32
     RTS
 
+; ---------------------------------------------------------------------------
+; NEXT_LBA: next LBA, but wrap from the last sector (Total-1) back to 0.
+; If LBA == Total-1, set LBA = 0; otherwise just increment (INC32).
+; Clobbers A.
+; ---------------------------------------------------------------------------
+NEXT_LBA:
+    ; last = Total - 1  (compute into NEXTTMP)
+    LDA TOTBUFF
+    SEC
+    SBC #$01
+    STA NEXTTMP
+    LDA TOTBUFF+1
+    SBC #$00
+    STA NEXTTMP+1
+    LDA TOTBUFF+2
+    SBC #$00
+    STA NEXTTMP+2
+    LDA TOTBUFF+3
+    SBC #$00
+    STA NEXTTMP+3
+    ; if LBA == last -> wrap to 0
+    LDA ZP_LBA0
+    CMP NEXTTMP
+    BNE NXT_INC
+    LDA ZP_LBA1
+    CMP NEXTTMP+1
+    BNE NXT_INC
+    LDA ZP_LBA2
+    CMP NEXTTMP+2
+    BNE NXT_INC
+    LDA ZP_LBA3
+    CMP NEXTTMP+3
+    BNE NXT_INC
+    ; LBA == last sector: wrap to 0
+    LDA #$00
+    STA ZP_LBA0
+    STA ZP_LBA1
+    STA ZP_LBA2
+    STA ZP_LBA3
+    RTS
+NXT_INC:
+    JSR INC32
+    RTS
+
 ; Toggle page 0 <-> 1
 TOGGLE_PAGE:
     LDA ZP_PAGE
@@ -1443,7 +1488,7 @@ MAIN_LOOP:
 ML_NOT_SPACE:
     CMP #$4E                ; 'N' -> next LBA
     BNE ML_NOT_N
-    JSR INC32
+    JSR NEXT_LBA
     JSR LOAD_AND_SHOW
     JMP MAIN_LOOP
 ML_NOT_N:
