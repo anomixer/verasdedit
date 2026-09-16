@@ -66,10 +66,16 @@ ZP_SPIDATHI  = $7F            ; VERA SPI DATA register address (high)
 ZP_SPISTLO   = $80            ; VERA SPI STATUS register address (low)
 ZP_SPISTHI   = $81            ; VERA SPI STATUS register address (high)
 
-SCRATCH      = $2F20          ; 16-byte scratch for the ASCII column (must stay above the code; moved up for room)
-DIRTYMAP     = $2F40          ; 32-byte dirty bitmap (1 bit per byte 0-255)
+SCRATCH      = $3300          ; 16-byte scratch for the ASCII column (must stay above the code; moved up for room)
+DIRTYMAP     = $3310          ; 32-byte dirty bitmap (1 bit per byte 0-255)
 ORIGBUF      = $3400          ; 512-byte pristine copy of the loaded sector (original values)
 ZPBACKUP     = $3200          ; 50-byte backup of ZP $50-$81, restored on QUIT so ProDOS/BASIC survive
+TOTBUFF      = $3330          ; 4 bytes: total sector count (32-bit, LSB..MSB) from CMD9 CSD
+CSDLO        = $3334          ; CMD9 CSD c_size low byte  (total sectors = (c_size+1)*1024)
+CSDMD        = $3335          ; CMD9 CSD c_size mid byte
+CSDHI        = $3336          ; CMD9 CSD c_size high byte (top 6 bits)
+SECTOR0      = $3600          ; sector buffer page 0 (bytes 0-255) — moved up so the code
+SECTOR1      = $3700          ; can grow past $3000 without overwriting sector data (page 1, bytes 256-511)
 
 ; VERA card registers (Slot 2: $C200-$C2FF)
 VERA_ADDR_L  = $C200
@@ -161,8 +167,10 @@ START:
     LDA ZP_LBA3
     STA ZP_OLBA3
 
-    ; Init VERA + SD, then load + display
+    ; Init VERA + SD, read the SD's total sector count (CMD9 -> CSD) for the
+    ; (TOTAL=...) display, then load + display
     JSR SD_INIT
+    JSR GET_SD_TOTAL
     JSR LOAD_AND_SHOW
     JMP MAIN_LOOP
 NOIRQ:
@@ -638,13 +646,88 @@ SD_INIT:
     RTS
 
 ; ---------------------------------------------------------------------------
-; Load sector: CMD17 + LBA, read 512 bytes to $3000 buffer
+; Read the SD card's total capacity via CMD9 (SEND_CSD) and store the total
+; sector count (512-byte sectors) in TOTBUFF (32-bit) for the (TOTAL=...) line.
+; The emulator's VERASD returns a 21-byte CSD; bytes 12/13/14 hold C_SIZE:
+;   c_size = ((b12 & 0x3F)<<16) | (b13<<8) | b14
+;   total_sectors = (c_size + 1) * 1024   == (c_size+1) << 10
+; We read all 21 bytes so the emulator's response is fully consumed (the next
+; SPI read won't return a stale CSD byte). Clobbers A, X, Y and ZP_TEMP.
+; ---------------------------------------------------------------------------
+GET_SD_TOTAL:
+    LDA #$00
+    STA RAMWRTOFF           ; write MAIN so TOTBUFF/CSD land in the right bank
+    LDA #$49                ; CMD9 (SEND_CSD)
+    JSR SPI_SEND_A
+    LDA #$00
+    JSR SPI_SEND_A
+    JSR SPI_SEND_A
+    JSR SPI_SEND_A
+    JSR SPI_SEND_A
+    LDA #$FF                ; CRC (emulator ignores it)
+    JSR SPI_SEND_A
+    LDX #$00                ; response byte index (0-20)
+GST_LOOP:
+    JSR SPI_READ_A          ; A = next CSD byte
+    CPX #$0C                ; byte 12 -> c_size high bits
+    BNE GST_NOT12
+    AND #$3F                ; top 6 bits of c_size
+    STA CSDHI
+    JMP GST_NEXT
+GST_NOT12:
+    CPX #$0D                ; byte 13 -> c_size mid byte
+    BNE GST_NOT13
+    STA CSDMD
+    JMP GST_NEXT
+GST_NOT13:
+    CPX #$0E                ; byte 14 -> c_size low byte
+    BNE GST_NEXT
+    STA CSDLO
+GST_NEXT:
+    INX
+    CPX #$15                ; read all 21 CSD bytes (consume the response)
+    BNE GST_LOOP
+    ; total = c_size + 1   (32-bit into TOTBUFF)
+    LDA CSDLO
+    CLC
+    ADC #$01
+    STA TOTBUFF
+    LDA CSDMD
+    ADC #$00
+    STA TOTBUFF+1
+    LDA CSDHI
+    ADC #$00
+    STA TOTBUFF+2
+    LDA #$00
+    ADC #$00
+    STA TOTBUFF+3
+    ; total = total << 10  (multiply by 1024)
+    LDA #$0A
+    JSR SHL_TOT
+    RTS
+
+; Shift TOTBUFF..TOTBUFF+3 (32-bit, LSB..MSB) left by A bits.
+; Clobbers A and ZP_TEMP.
+SHL_TOT:
+    STA ZP_TEMP
+ST_LOOP:
+    CLC
+    ROL TOTBUFF
+    ROL TOTBUFF+1
+    ROL TOTBUFF+2
+    ROL TOTBUFF+3
+    DEC ZP_TEMP
+    BNE ST_LOOP
+    RTS
+
+; ---------------------------------------------------------------------------
+; Load sector: CMD17 + LBA, read 512 bytes to the sector buffer (SECTOR0/SECTOR1)
 ; ---------------------------------------------------------------------------
 LOAD_SECTOR:
     LDA #$00
     STA ZP_ERR              ; assume success until proven otherwise
     LDA #$00
-    STA RAMWRTOFF           ; main write, so sector buffer ($3000/$3100) goes to MAIN
+    STA RAMWRTOFF           ; main write, so sector buffer (SECTOR0/SECTOR1) goes to MAIN
     LDA #$51
     JSR SPI_SEND_A
     LDA ZP_LBA3
@@ -667,14 +750,14 @@ LOAD_SECTOR:
     LDX #$00
 LR_LOOP:
     JSR SPI_READ_A
-    STA $3000, X
+    STA SECTOR0, X
     INX
     CPX #$00
     BNE LR_LOOP
     LDX #$00
 LR_LOOP2:
     JSR SPI_READ_A
-    STA $3100, X
+    STA SECTOR1, X
     INX
     CPX #$00
     BNE LR_LOOP2
@@ -863,10 +946,10 @@ HB_LOOP:
     STA RAMWRTOFF           ; main write, so SCRATCH saves go to MAIN memory
     LDA ZP_PAGE
     BNE HB_PAGE1
-    LDA $3000, X
+    LDA SECTOR0, X
     JMP HB_HAVE
 HB_PAGE1:
-    LDA $3100, X
+    LDA SECTOR1, X
 HB_HAVE:
     LDY ZP_TEMP2
     STA SCRATCH, Y          ; save byte for ASCII column
@@ -878,10 +961,10 @@ HB_HAVE:
     TAY
     LDA ZP_PAGE
     BNE HB_HAVE_P1
-    LDA $3000, Y
+    LDA SECTOR0, Y
     JMP HB_HAVE_GO
 HB_HAVE_P1:
-    LDA $3100, Y
+    LDA SECTOR1, Y
 HB_HAVE_GO:
     JSR PRINT_HEX2
     LDA #$00
@@ -973,7 +1056,8 @@ PN_DONE:
     RTS
 
 ; ---------------------------------------------------------------------------
-; LBA line: "LBA=xxxxxxxx  PAGE n" (n = 1 or 2)
+; LBA line: "LBA=xxxxxxxx  (TOTAL=000nnnnnn) PAGE n" (n = 1 or 2)
+; TOTAL = total sectors (512-byte) from CMD9 CSD, shown as 9 hex digits.
 ; ---------------------------------------------------------------------------
 PRINT_LBA_LINE:
     LDA #$00
@@ -997,6 +1081,35 @@ PRINT_LBA_LINE:
     LDA #$20                ; ' '
     JSR PUTCH
     LDA #$20
+    JSR PUTCH
+    ; (TOTAL=000nnnnnn) — total sectors from CMD9, printed as 9 hex digits
+    LDA #$28                ; '('
+    JSR PUTCH
+    LDA #$54                ; 'T'
+    JSR PUTCH
+    LDA #$4F                ; 'O'
+    JSR PUTCH
+    LDA #$54                ; 'T'
+    JSR PUTCH
+    LDA #$41                ; 'A'
+    JSR PUTCH
+    LDA #$4C                ; 'L'
+    JSR PUTCH
+    LDA #$3D                ; '='
+    JSR PUTCH
+    LDA #$30                ; leading '0' (9-digit TOTAL)
+    JSR PUTCH
+    LDA TOTBUFF+3
+    JSR PRINT_HEX2
+    LDA TOTBUFF+2
+    JSR PRINT_HEX2
+    LDA TOTBUFF+1
+    JSR PRINT_HEX2
+    LDA TOTBUFF
+    JSR PRINT_HEX2
+    LDA #$29                ; ')'
+    JSR PUTCH
+    LDA #$20                ; ' '
     JSR PUTCH
     LDA #$50                ; 'P'
     JSR PUTCH
@@ -1138,6 +1251,36 @@ DEC_L3:
     STA ZP_LBA0
     RTS
 
+; ---------------------------------------------------------------------------
+; PREV_LBA: previous LBA, but wrap from 0 to the last sector (Total-1).
+; If LBA == 0, load LBA = TOTBUFF - 1; otherwise just decrement (DEC32).
+; Clobbers A.
+; ---------------------------------------------------------------------------
+PREV_LBA:
+    LDA ZP_LBA0
+    ORA ZP_LBA1
+    ORA ZP_LBA2
+    ORA ZP_LBA3
+    BNE PREV_DEC            ; non-zero -> plain decrement
+    ; LBA == 0: wrap to the last sector = Total - 1
+    LDA TOTBUFF
+    SEC
+    SBC #$01
+    STA ZP_LBA0
+    LDA TOTBUFF+1
+    SBC #$00
+    STA ZP_LBA1
+    LDA TOTBUFF+2
+    SBC #$00
+    STA ZP_LBA2
+    LDA TOTBUFF+3
+    SBC #$00
+    STA ZP_LBA3
+    RTS
+PREV_DEC:
+    JSR DEC32
+    RTS
+
 ; Toggle page 0 <-> 1
 TOGGLE_PAGE:
     LDA ZP_PAGE
@@ -1149,7 +1292,7 @@ TOGGLE_PAGE:
 ; String messages
 ; ---------------------------------------------------------------------------
 MSG1:
-    ASC "VeraSDEdit (Hex Sector Editor) by anomixer 2026"
+    ASC "VeraSDEdit (Hex Sector Editor)  v1.01 by anomixer 2026"
     !BYTE $0D, 0
 MSG_HEAD:
     ASC "Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump"
@@ -1306,7 +1449,7 @@ ML_NOT_SPACE:
 ML_NOT_N:
     CMP #$50                ; 'P' -> prev LBA
     BNE ML_NOT_P
-    JSR DEC32
+    JSR PREV_LBA
     JSR LOAD_AND_SHOW
     JMP MAIN_LOOP
 ML_NOT_P:
@@ -1506,22 +1649,22 @@ UD_PAD_DONE:
 
 ; ---------------------------------------------------------------------------
 ; Fetch A = buffer[ZP_EDIT] for the current page (ZP_PAGE).
-; RAMRD stays at MAIN (we never switch it), so the buffer at $3000/$3100 is
+; RAMRD stays at MAIN (we never switch it), so the buffer at SECTOR0/SECTOR1 is
 ; read directly.
 ; ---------------------------------------------------------------------------
 GET_BUF_BYTE:
     LDA ZP_PAGE
     BNE GB_P1
     LDY ZP_EDIT
-    LDA $3000, Y
+    LDA SECTOR0, Y
     RTS
 GB_P1:
     LDY ZP_EDIT
-    LDA $3100, Y
+    LDA SECTOR1, Y
     RTS
 
 ; ---------------------------------------------------------------------------
-; Store ZP_TEMP2 -> buffer[ZP_EDIT] (MAIN bank, $3000 or $3100).
+; Store ZP_TEMP2 -> buffer[ZP_EDIT] (MAIN bank, SECTOR0 or SECTOR1).
 ; ---------------------------------------------------------------------------
 STORE_BUF_BYTE:
     LDA #$00
@@ -1530,12 +1673,12 @@ STORE_BUF_BYTE:
     BNE SB_P1
     LDY ZP_EDIT
     LDA ZP_TEMP2
-    STA $3000, Y
+    STA SECTOR0, Y
     JMP SB_DONE
 SB_P1:
     LDY ZP_EDIT
     LDA ZP_TEMP2
-    STA $3100, Y
+    STA SECTOR1, Y
 SB_DONE:
     RTS
 
@@ -1757,7 +1900,7 @@ SDF_SET:
     RTS
 
 ; ---------------------------------------------------------------------------
-; COPY_ORIG: copy the loaded sector ($3000/$3100, 512 bytes) to ORIGBUF.
+; COPY_ORIG: copy the loaded sector (SECTOR0/SECTOR1, 512 bytes) to ORIGBUF.
 ; Call after a successful LOAD_SECTOR so ORIGBUF always holds the last-good
 ; original values (and after W, so ORIGBUF tracks the written sector).
 ; ---------------------------------------------------------------------------
@@ -1766,12 +1909,12 @@ COPY_ORIG:
     STA RAMWRTOFF           ; write MAIN
     LDX #$00
 CO_LOOP0:
-    LDA $3000, X
+    LDA SECTOR0, X
     STA ORIGBUF, X
     INX
     BNE CO_LOOP0
 CO_LOOP1:
-    LDA $3100, X
+    LDA SECTOR1, X
     STA ORIGBUF+$100, X
     INX
     BNE CO_LOOP1
@@ -1803,16 +1946,16 @@ WRITE_SECTOR:
     BNE WS_FAIL             ; non-zero R1 -> fail
     LDA #$FE                ; data start token
     JSR SPI_SEND_A
-    ; send 512 bytes: $3000 (256) then $3100 (256)
+    ; send 512 bytes: SECTOR0 (256) then SECTOR1 (256)
     LDX #$00
 WS_LOOP0:
-    LDA $3000, X
+    LDA SECTOR0, X
     JSR SPI_SEND_A
     INX
     BNE WS_LOOP0
     LDX #$00
 WS_LOOP1:
-    LDA $3100, X
+    LDA SECTOR1, X
     JSR SPI_SEND_A
     INX
     BNE WS_LOOP1

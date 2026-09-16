@@ -27,7 +27,7 @@ hard-won debugging lessons so future work doesn't re-trace the same mistakes.
 
 | File | Description |
 |------|-------------|
-| `verasdedit.asm` | 6502 assembly source (loads at `$2000`, ~3.1 KB) |
+| `verasdedit.asm` | 6502 assembly source (loads at `$2000`, ~4.0 KB) |
 | `verasdedit.mjs` | Build script (Node.js ESM): assembles `.asm` → packs a ProDOS disk |
 | `startup.bas` | Applesoft BASIC boot program: prints the banner, **detects the VERA card (slot 2 then slot 4)** via PEEK/POKE, then `BRUN VERASDEDIT.BIN`; halts with "No VERA Card Detected on Slot 2 or 4!" if neither slot has one |
 | `asm6502.mjs` | **Dependency**: 6502 assembler (`assemble6502`), vendored |
@@ -56,7 +56,7 @@ Successful output (current sizes):
 
 ```
 Created ...\verasdedit.po (143360 bytes)
-  VERASDEDIT.BIN: 3848 bytes (load $2000)
+  VERASDEDIT.BIN: 4112 bytes (load $2000)
   STARTUP: 783 bytes
 ```
 
@@ -83,7 +83,7 @@ Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
 | Key | Action |
 |-----|--------|
 | `SPACE` | Toggle page (PAGE 1 ↔ PAGE 2) |
-| `N` / `P` | Next / previous LBA |
+| `N` / `P` | Next LBA / previous LBA (`P` wraps from 0 to the last sector, Total−1) |
 | `R` | Reload current LBA |
 | `L` | Select LBA — type 1–8 hex digits + `RETURN` to load, `DEL` backspace, `ESC` cancel |
 | `E` | Enter editor mode |
@@ -130,7 +130,7 @@ screen.
 Edited bytes show **inverse**, the cursor cell **flashes** — `PUTCH` supports
 three display modes (`ZP_DISPMODE`: 0=normal `|0x80`, 1=inverse `&0x3F`,
 2=flash `&0x3F|0x40`; the 80-col flash bit is bit6 with bit7 clear). A 32-byte
-dirty bitmap (`$2F40`, 1 bit per byte) tracks edits; `W` clears it.
+dirty bitmap (`$3310`, 1 bit per byte) tracks edits; `W` clears it.
 
 A **changed byte shows inverse** (both nibbles) until written — and a byte only
 counts as changed if its value actually differs from the **original** (the
@@ -172,7 +172,7 @@ mode.
 3. **SCRATCH / sector-buffer banking — and keep SCRATCH above the code.** `$0200–$BFFF`
    is subject to RAMWRT(write)/RAMRD(read) soft-switches. `PUTCH` toggles the bank
    per char, which leaks into other memory writes. The guest must explicitly
-   `STA RAMWRTOFF` before writing SCRATCH or the sector buffer (`$3000`/`$3100`),
+   `STA RAMWRTOFF` before writing SCRATCH or the sector buffer (`SECTOR0`/`SECTOR1`),
    and `RAMRDOFF` before reading them, or data silently lands in the wrong bank
    (e.g. ASCII column garbled, or a reloaded sector not updating the display).
    **SCRATCH must also sit strictly above the code** — it's a 16-byte work area
@@ -180,9 +180,14 @@ mode.
    added. When SCRATCH was `$2E00` and the program grew to 3587 bytes
    (`$2000`–`$2E02`), `DRAW_DATA`'s `STA SCRATCH,Y` overwrote the trailing
    `JMP EDIT_LOOP` with sector data → the guest executed garbage and hit a `BRK`
-   at `$2E02` after any byte edit. SCRATCH is now `$2F20` (code ends ~`$2F08`);
-   DIRTYMAP is `$2F40`, ZPBACKUP `$3200`. **If you add code, re-check that the
-   code end (`load + length`) stays below `SCRATCH`.**
+   at `$2E02` after any byte edit. SCRATCH was moved up again when the TOTAL
+   (CMD9/CSD) feature was added, and the sector buffers were relocated when the
+   `P`-wrap (`PREV_LBA`) feature pushed the code past `$3000`. Current layout
+   (code 4112 bytes, end `$3010`): SCRATCH `$3300`, DIRTYMAP `$3310`, TOTBUFF/CSD
+   `$3330`–`$3336`, ZPBACKUP `$3200`, ORIGBUF `$3400`, sector buffers
+   `SECTOR0`=`$3600`/`SECTOR1`=`$3700`. **The code must never overlap the lowest
+   buffer, ZPBACKUP (`$3200`)** — re-check that code end (`load + length`) stays
+   below it when adding code.
 4. **Subroutine A-clobber pitfall.** `HEX_DISPMODE`/`ASCII_DISPMODE` use A as a
    temp and clobber the byte being printed; reload the buffer byte after calling
    them, or the hex column shows garbage.

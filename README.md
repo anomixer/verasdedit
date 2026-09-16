@@ -119,12 +119,17 @@ Copy `verasdedit.po` to `Release\` and boot it in AppleWin.
    slot itself and reads LBA `800` (FAT32 boot sector):
 
 ```
-VeraSDEdit (Hex Sector Editor) by anomixer 2026
-LBA=00000800  PAGE 1
+VeraSDEdit (Hex Sector Editor)  v1.01 by anomixer 2026
+LBA=00000800  (TOTAL=000nnnnnn) PAGE 1
 Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 ------ -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --   ----------------
  0000  EB 58 90 43 4D 44 52 2D 44 4F 53 00 02 02 20 00   .X.CMDR-DOS... .
 ```
+
+> `LBA=xxxxxxxx` is the current sector as 8 hex digits (32-bit — enough for the
+> FAT32 2 TB ceiling). `(TOTAL=000nnnnnn)` is the SD image's **total sector count**
+> (512-byte sectors), read from the card's CSD register via **CMD9 (SEND_CSD)** on
+> startup — handy for knowing the FAT32 capacity boundary.
 
 <a id="keys"></a>
 ### Keys
@@ -133,7 +138,7 @@ Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 |-----|--------|
 | `SPACE` | Toggle page (PAGE 1 ↔ PAGE 2) |
 | `N` | Next LBA (LBA+1) |
-| `P` | Previous LBA (LBA−1, clamped at 0) |
+| `P` | Previous LBA (LBA−1; from 0 it wraps to the last sector, Total−1) |
 | `R` | Reload current LBA |
 | `L` | **Select LBA** — type 1–8 hex digits + `RETURN` to load, `DEL` backspace, `ESC` cancel back to the editor |
 | `E` | Enter **editor** mode (see below) |
@@ -317,12 +322,17 @@ Created ...\verasdedit.po (143360 bytes)
    並結束）。editor 再自己偵測一次 slot，讀取 LBA `800`（FAT32 boot sector）：
 
 ```
-VeraSDEdit (Hex Sector Editor) by anomixer 2026
-LBA=00000800  PAGE 1
+VeraSDEdit (Hex Sector Editor)  v1.01 by anomixer 2026
+LBA=00000800  (TOTAL=000nnnnnn) PAGE 1
 Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 ------ -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --   ----------------
  0000  EB 58 90 43 4D 44 52 2D 44 4F 53 00 02 02 20 00   .X.CMDR-DOS... .
 ```
+
+> `LBA=xxxxxxxx` 是目前 sector，以 8 個 hex 位數顯示（32-bit——正好能涵蓋
+> FAT32 的 2 TB 上限）。`(TOTAL=000nnnnnn)` 是 SD 影像的**總磁區數**
+> （512-byte sector），開機時用 **CMD9（SEND_CSD）** 讀 CSD register 算出來，
+> 方便知道 FAT32 容量邊界。
 
 <a id="cn-keys"></a>
 ### 鍵盤操作
@@ -331,7 +341,7 @@ Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump
 |------|------|
 | `SPACE` | 換頁（PAGE 1 ↔ PAGE 2） |
 | `N` | 下一個 LBA（LBA+1） |
-| `P` | 上一個 LBA（LBA−1，夾在 0） |
+| `P` | 上一個 LBA（LBA−1；在 0 時繞回最後一顆磁區 Total−1） |
 | `R` | 重新載入目前 LBA |
 | `L` | **選擇 LBA**——輸入 1–8 個 hex digit + `RETURN` 載入，`DEL` 退格，`ESC` 取消回 editor |
 | `E` | 進入**編輯模式**（見下） |
