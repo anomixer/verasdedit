@@ -14,6 +14,7 @@
   - [Build](#build)
   - [Usage](#usage)
   - [Keys](#keys)
+  - [verasdformat (FAT32 Formatter, W.I.P.)](#verasdformat)
   - [Technical background](#technical-background)
   - [Note on the vendored assembler](#vendored-assembler)
 - 🇹🇼 **繁體中文**
@@ -22,6 +23,7 @@
   - [建置](#cn-build)
   - [使用方式](#cn-usage)
   - [鍵盤操作](#cn-keys)
+  - [verasdformat（FAT32 格式化工具，W.I.P.）](#cn-verasdformat)
   - [技術背景](#cn-technical-background)
   - [組譯器版本備註](#cn-vendored-assembler)
 
@@ -49,13 +51,19 @@ offset 0–511 as **hex + ASCII** in two pages (256 bytes / 16 rows each).
 
 | File | Description |
 |------|-------------|
-| `verasdedit.asm` | 6502 assembly source (loads at `$2000`, ~3.1 KB) |
-| `verasdedit.mjs` | Build script (Node.js ESM): assembles `.asm` → packs a ProDOS disk |
-| `startup.bas` | Applesoft BASIC boot program: prints the banner, **detects the VERA card (slot 2 then slot 4)** via PEEK/POKE, then `BRUN VERASDEDIT.BIN`; halts with "No VERA Card Detected on Slot 2 or 4!" if neither slot has one |
-| `verasdedit.po` | **Prebuilt ProDOS disk image** (143360 bytes) — ready to use, **no rebuild needed** |
+| `verasdedit.asm` | 6502 assembly source: hex sector editor (loads at `$2000`, ~4.1 KB) |
+| `verasdedit.mjs` | Build script (Node.js ESM): assembles `verasdedit.asm` → packs `verasdedit.po` |
+| `startup.bas` | Applesoft BASIC boot program for VeraSDEdit |
+| `verasdedit.po` | **Prebuilt ProDOS disk image** for VeraSDEdit (143360 bytes) |
+| `build.bat` | One-click build script (Windows): `node verasdedit.mjs` |
+| `verasdformat.asm` | 6502 assembly source: FAT32 SD formatter (loads at `$2000`, ~8.0 KB, W.I.P.) |
+| `verasdformat.mjs` | Build script (Node.js ESM): assembles `verasdformat.asm` → packs `verasdformat.po` |
+| `verasdformat_startup.bas` | Applesoft BASIC boot program for VeraSDFormat |
+| `verasdformat.po` | **Prebuilt ProDOS disk image** for VeraSDFormat (143360 bytes) |
+| `build_verasdformat.bat` | One-click build script (Windows): `node verasdformat.mjs` |
 | `asm6502.mjs` | **Dependency**: 6502 assembler (`assemble6502`), vendored |
 | `applebasic.mjs` | **Dependency**: Applesoft BASIC compiler (`compileApplesoftBasic`), vendored |
-| `build.bat` | One-click build script (Windows): `node verasdedit.mjs` |
+| `base/ProDOS_2_4_3.po` | **Dependency**: ProDOS 2.4.3 base disk image |
 
 > `verasdedit/*.bin`, `*.bmp`, `*.png`, `test_asm*.mjs` are git-ignored.
 
@@ -207,6 +215,28 @@ The editor has two states:
   bytes + 2 CRC bytes.
 * After `W` the dirty indicator clears; `ESC` without `W` discards changes.
 
+<a id="verasdformat"></a>
+### verasdformat — FAT32 Formatter for VERA SD/MMC (W.I.P.)
+
+A companion utility in this repository that formats a VERA-attached SD/MMC card image to **FAT32** for use on the Apple II with CMDR-DOS and A2VERA.
+
+- **MBR + Partition**: Writes an MBR partition table (partition type `$0C`, FAT32 LBA) starting at LBA 2048.
+- **FAT32 Volume**: Formats VBR, FSInfo, backup VBR/FSInfo, FAT #1, FAT #2, and initializes root cluster 2.
+- **Menu Options**:
+  - `[1] Catalog SD`: Lists root directory 8.3 filenames and file sizes.
+  - `[2] Format SD`: Quick format. Requires typing `FORMAT` + `RETURN` to confirm; `ESC` aborts.
+  - `[3] Verify SD`: Reads back all metadata sectors via CMD17 and validates byte-for-byte against generated templates.
+  - `[0] Exit`: Clean exit back to ProDOS.
+- **Build**:
+  ```powershell
+  build_verasdformat.bat    # Windows one-click
+  node verasdformat.mjs     # any platform
+  ```
+- **Running in AppleWin**:
+  ```powershell
+  AppleWin.exe -s2 vera -d1 verasdformat.po -power-on
+  ```
+
 <a id="technical-background"></a>
 ### Technical background
 
@@ -257,13 +287,19 @@ The vendored `asm6502.mjs` includes three fixes you must keep if you ever replac
 
 | 檔案 | 說明 |
 |------|------|
-| `verasdedit.asm` | 6502 組合語言原始碼（載入 `$2000`，約 3.1 KB） |
-| `verasdedit.mjs` | 建置腳本（Node.js ESM）：組譯 `.asm` → 包 ProDOS 磁片 |
-| `startup.bas` | Applesoft BASIC 啟動程式：印 banner、**用 PEEK/POKE 偵測 VERA 卡（先 Slot 2 再 Slot 4）**，偵測到才 `BRUN VERASDEDIT.BIN`；兩槽都沒有就印 `No VERA Card Detected on Slot 2 or 4!` 並結束 |
-| `verasdedit.po` | **已建置好的 ProDOS 磁片影像**（143360 bytes）——直接可用，**不必重建** |
+| `verasdedit.asm` | 6502 組合語言原始碼：十六進位磁區編輯器（載入 `$2000`，約 4.1 KB） |
+| `verasdedit.mjs` | 建置腳本（Node.js ESM）：組譯 `verasdedit.asm` → 打包 `verasdedit.po` |
+| `startup.bas` | Applesoft BASIC 啟動程式（VeraSDEdit） |
+| `verasdedit.po` | **已建置好的 ProDOS 磁片影像**（VeraSDEdit，143360 bytes） |
+| `build.bat` | 一鍵建置腳本（Windows）：`node verasdedit.mjs` |
+| `verasdformat.asm` | 6502 組合語言原始碼：FAT32 SD 卡格式化工具（載入 `$2000`，約 8.0 KB，W.I.P.） |
+| `verasdformat.mjs` | 建置腳本（Node.js ESM）：組譯 `verasdformat.asm` → 打包 `verasdformat.po` |
+| `verasdformat_startup.bas` | Applesoft BASIC 啟動程式（VeraSDFormat） |
+| `verasdformat.po` | **已建置好的 ProDOS 磁片影像**（VeraSDFormat，143360 bytes） |
+| `build_verasdformat.bat` | 一鍵建置腳本（Windows）：`node verasdformat.mjs` |
 | `asm6502.mjs` | **依賴**：6502 組譯器（`assemble6502`），已 vendored |
 | `applebasic.mjs` | **依賴**：Applesoft BASIC 編譯器（`compileApplesoftBasic`），已 vendored |
-| `build.bat` | 一鍵建置腳本（Windows）：`node verasdedit.mjs` |
+| `base/ProDOS_2_4_3.po` | **依賴**：ProDOS 2.4.3 基底磁片影像 |
 
 > `verasdedit/*.bin`、`*.bmp`、`*.png`、`test_asm*.mjs` 已被 `.gitignore` 排除。
 
@@ -393,6 +429,28 @@ nibble 閃爍、ASCII 欄游標字元閃爍，即使該 byte 已改過（反白�
 * `W` 透過 CMD24（WRITE_SINGLE_BLOCK）把目前 sector 的**全部 512 bytes**
   （兩頁）寫回——guest 送 token `0xFE` + 512 bytes data + 2 bytes CRC。
 * `W` 後 dirty 指示清除；未 `W` 就 `ESC` 則捨棄修改。
+
+<a id="cn-verasdformat"></a>
+### verasdformat — VERA SD/MMC FAT32 格式化工具 (W.I.P.)
+
+本儲存庫的第二個獨立工具，將 VERA 擴充卡上的 SD 卡影像格式化為相容 CMDR-DOS 與 A2VERA 的標準 **FAT32** 磁碟格式。
+
+- **MBR 分割區**：建立 MBR 分割表，自 LBA 2048 起建立類型 `$0C`（FAT32 LBA）主要分割區。
+- **FAT32 磁區結構**：依序寫入 VBR（開機磁區）、FSInfo、備份開機磁區、FAT #1、FAT #2，並初始化根目錄第 2 cluster。
+- **功能選單**：
+  - `[1] Catalog SD`：列出根目錄 8.3 格式檔名與檔案大小。
+  - `[2] Format SD`：快速格式化。需手動鍵入 `FORMAT` 並按 `RETURN` 確認執行，按 `ESC` 隨時取消。
+  - `[3] Verify SD`：透過 CMD17 逐一讀回所有中繼資料磁區，與樣板進行 512-byte 逐位元組比對驗證。
+  - `[0] Exit`：還原零頁與中斷向量，乾淨返回 ProDOS。
+- **建置方式**：
+  ```powershell
+  build_verasdformat.bat    # Windows 一鍵建置
+  node verasdformat.mjs     # 跨平台建置
+  ```
+- **AppleWin 執行**：
+  ```powershell
+  AppleWin.exe -s2 vera -d1 verasdformat.po -power-on
+  ```
 
 <a id="cn-technical-background"></a>
 ### 技術背景

@@ -245,7 +245,25 @@ export const assemble6502 = (lines, startAddress = 0x2000, extraLabels = {}) => 
 
     if (instr === "CMP") {
       if (operand.startsWith("#")) return [0xC9, resolveVal(operand)]
+      if (operand.startsWith("(") && operand.endsWith("),Y")) {
+        const val = resolveVal(operand.replace("(", "").replace("),Y", ""))
+        return [0xD1, val & 0xFF]
+      }
+      if (operand.startsWith("$") && operand.length <= 3) {
+        return [0xC5, resolveVal(operand)]
+      }
+      if (operand.endsWith(",X")) {
+        const val = resolveVal(operand.replace(",X", ""))
+        return [0xDD, val & 0xFF, (val >> 8) & 0xFF]
+      }
+      if (operand.endsWith(",Y")) {
+        const val = resolveVal(operand.replace(",Y", ""))
+        return [0xD9, val & 0xFF, (val >> 8) & 0xFF]
+      }
       const val = resolveVal(operand)
+      if (val <= 0xFF && (operand.startsWith("$") || (currentLabels && operand in currentLabels && currentLabels[operand] <= 0xFF))) {
+        return [0xC5, val & 0xFF]
+      }
       return [0xCD, val & 0xFF, (val >> 8) & 0xFF]
     }
 
@@ -371,6 +389,7 @@ export const assemble6502 = (lines, startAddress = 0x2000, extraLabels = {}) => 
     pc += b.length
   }
 
+  Object.assign(extraLabels, labels)
   return new Uint8Array(bytes)
 }
 

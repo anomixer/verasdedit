@@ -248,3 +248,191 @@ mode.
   `PrintWindow` return handle 0, so screenshots don't work — use a text-page
   dump diagnostic instead. `MemGetAuxPtr` has a cache artifact; some chars are
   garbled when rebuilding the frame.
+
+---
+
+# verasdformat — FAT32 SD formatter (W.I.P.)
+
+A second guest program in this repo: formats a VERA-attached SD image to
+FAT32 for Apple II use by CMDR-DOS and A2VERA. **Pure 6502 only** (user
+requirement — no 65c02 instructions). Source `verasdformat.asm` (~3800 lines),
+build `node verasdformat.mjs` → `VERASDFMT.BIN` + `STARTUP` on the ProDOS base
+→ `verasdformat.po` (143360 bytes).
+
+## Scope (user decisions — do not over-build)
+
+- **CATALOG SD** only needs to list root-directory **8.3 filenames + file
+  sizes** ("先只做出能列根目錄 8.3 的檔名和檔案大小就好, 怕你做太詳細").
+  Mirror `C:\dev\a2vera\a2vera\sd_diag.asm` (`list_root` lines 374–471) and
+  the FAT32 helpers in `C:\dev\a2vera\a2vera\vera_sd.inc`: `fat_mount`
+  (line 964: MBR+VBR → secs/clus, fat_begin_lba, clus_begin_lba, root_clus),
+  `clus_to_lba` (1119), `fat_next_cluster` (1175), `sd_read_block` (503).
+- **No super floppy.** FORMAT = build MBR partition table first (type `$0C`,
+  start LBA 2048), then format that partition as FAT32.
+- Main menu: **1) CATALOG SD, 2) FORMAT SD, 3) VERIFY SD, 0) EXIT**.
+
+## Memory layout (current — code end must stay below ZPBACKUP)
+
+Program loads `$2000`, currently **7896 bytes, ending at `$3F08`** (14-byte
+headroom to ZPBACKUP `$3F16`; any growth past that needs a repack of the
+scratch block).
+
+- ZP: `ZP_CURSOR=$58`, `ZP_LBA0-3=$50-$53`, `ZP_TEMP=$5A`/`ZP_TEMP2=$5B`,
+  `ZP_BUFLO=$5E`/`ZP_BUFPG=$5F`, `ZP_SPIDATLO=$6F`/`ZP_SPISTLO=$71`,
+  `ZP_ERR=$75`, `ZP_PTR2=$78`/`ZP_PTR2HI=$79`, `ZP_PTR3=$7A`/`ZP_PTR3HI=$7B`,
+  `ZP_SCR0-3=$7C-$7F`.
+- Scratch: `ZPBACKUP=$3F16` (48 bytes, $50–$7F), **`VARS=$3F50`** (all VARS
+  vars on page `$3F`, so pointer high bytes must be `$3F`), `MATHSB=$3FB8`,
+  `CA_FATBG=$3FC0`, `CA_CLUSBG=$3FC4`, `CA_ROOTC=$3FC8`, `CA_CURC=$3FCC`,
+  `CA_CURLBA=$3FD0`, `CA_SECTS=$3FD4`, `CA_WANT=$3FD5`, `CA_TMP=$3FD9`,
+  `CA_FSZ=$3FDD`, `CA_SPC=$3FE1`, `CA_ENTRY=$3FE2`, `WRKBUF=$4000`,
+  `TMPBUF=$4200`.
+- VARS offsets: `V_TOTAL=+0($3F50)`, `V_CSIZE=+4`, `V_PART=+8`,
+  `V_PSIZE=+$0C`, `V_FATSZ=+$10`, `V_CLUST=+$14`, `V_DATA=+$18`,
+  `V_ARG=+$1C`, `V_REM=+$20($3F70)`, `V_TMP1=+$24($3F74)`,
+  `V_TMP2=+$28($3F78)`, `V_TMP3=+$2C($3F7C)`, `V_TMP4=+$30($3F80)`,
+  `V_SPC=+$34`, `V_CSDV2=+$38`, `V_DIGBUF=+$58($3FA8)`.
+
+## Assembler gotchas (asm6502.mjs, verified in this project)
+
+- **No indexed-Y on `AND`/`ORA`/`EOR`/`CMP`/`SBC`/`ADC`** — only immediate /
+  absolute. A `label,Y` operand is **silently dropped and assembled as `$0000`**.
+  (Same family of bug as verasdedit lesson 6.)
+- **Char literals `#'x'` are NOT parsed** — they resolve to `#0`. Use hex bytes
+  (`#$20`, `#$30`, …). All char literals in this file were already converted.
+- `CPX`/`CPY` pick ZP for `$XX`/ZP labels, absolute otherwise (fixed handler).
+- `STA abs,Y` and `STA (zp),Y` are supported and verified. `ROR A`→$6A,
+  `ASL A`→$0A, `LSR A`→$4A, `ROL A`→$2A all verified correct.
+- **`SEC`/`CLC` are `$38`/`$18` in this assembler** (lines 90–91) — the
+  correct 6502 opcodes. A binary pattern search that assumes `SEC`=`$EA`
+  (NOP) finds nothing and falsely suggests an assembler bug; verify by
+  assembling a small test file, not by guessing opcodes.
+- **Indexed-X with a ZP label emits the absolute form**: `STA V_CSIZE,X` →
+  `9D 54 3F` (3 bytes) even though the label is on page $3F — only `$XX`
+  *literal* operands get the 2-byte ZP form. Functionally correct; just don't
+  expect the short form when grepping the binary.
+- **PowerShell quoting**: double-quoted inline `node -e "..."` commands mangle
+  `$XX` hex tokens (PS expands them as variables → labels resolve to $0000,
+  immediates lost). Write isolated assembler tests to a `.mjs` file and run
+  `node file.mjs` instead.
+
+## Debugging lessons (verasdformat-specific)
+
+1. **`PRINT_NIB` hex-letter off-by-one.** After `CMP #$3A`, the carry makes
+   `ADC #$07` produce `$08` — letters printed one high (5A→"5B"). Fixed to
+   `ADC #$06`.
+2. **`ZP_PTR2HI`/`ZP_PTR3HI` clobbered by SD routines** → garbage digits in
+   decimal output. Fix: pin `LDA #$3F / STA ZP_PTR2HI / STA ZP_PTR3HI` at the
+   start of every routine that dereferences them (`PRINT_DEC32W`,
+   `COMPUTE_GEOMETRY`, …) — all VARS live on page `$3F`.
+3. **Unbounded `PDW_LOOP` hung** — now bounded by a counter in `ZP_SCR3`
+   (max $20 digits).
+4. **RAMWRT bank leak from `PUTCH` — root cause of the garbled capacity line.**
+   `PUTCH` toggles RAMWRT per column (even→AUX, odd→MAIN); reads always come
+   from MAIN (RAMRD is never switched). So any store into VARS/WRKBUF after a
+   display call lands in whichever bank the last column left — decimal digits
+   garbled (`V_DIGBUF` written to AUX), `V_TMP1` dump garbage, MiB=2.
+   **Fix: force `LDA #$00 / STA RAMWRTOFF` at the start of every routine that
+   writes `$3F50–$4FFF` after display calls** (`PRINT_DEC32W`, `SHR32`,
+   `SHL_TOTAL`, `DIV32`, the `SCL_CP` copy in `SHOW_CAP_LINE`,
+   `COMPUTE_GEOMETRY`). `SD_READ_SECTOR`/`SD_WRITE_SECTOR`/templates already
+   do this. (Same class as verasdedit lesson 3.)
+5. **CSD stream is PERFECT — the capacity bug is a byte-order error in the
+   +1 block (root cause found, fix not yet applied).** Verified via the
+   emulator's own SPI log (see Test workflow): after the CMD9 frame
+   (`49 00 00 00 00 FF`) the guest receives exactly the 21-byte CSD with no
+   R1 prefix — for the 100 MB test card: `ff ff 00 ff fe 40 0e 00 32 5b 59
+   00 | 00 00 C7 | 7f 80 0a 40 00 01`, i.e. b12/b13/b14 = `00 00 C7` →
+   c_size=199 → total should be **204800 sectors**. `GST_LOOP` stores the
+   raw stream into `WRKBUF[0..20]` and row 4 dumps it as 42 hex chars.
+   **The bug:** `GET_SD_TOTAL`'s +1 block builds
+   `V_TOTAL = [V_CSIZE+2, V_CSIZE+1, V_CSIZE, $00] + 1` — but `V_CSIZE[0]`
+   (CSD byte 12) is the *most* significant c_size byte, so this puts c_size
+   MSB-first bytes in **reverse** order: with the verified stream it yields
+   `$C7000001`, and ×1024 → `$00000400` = 1024 sectors (0 MiB). Correct
+   build: `V_TOTAL = [$00, V_CSIZE, V_CSIZE+1, V_CSIZE+2] + 1` (= c_size+1,
+   top byte stays 0 since c_size < 2^18) → `$000000C8` → ×1024 =
+   **$00032000 = 204800** ✓. (The earlier "observed $00040C00" came from an
+   older build with different code — superseded.) Emulator protocol
+   reference: `VERASD.cpp` `SetResponseCSD` (static 21-byte CSD,
+   c_size=(FileSizeBytes()>>19)-1 into bytes 12/13/14), `HandleByte`
+   (response starts on the first $FF after the 6-byte frame; no R1 for
+   CMD9), `SpiWrite/SpiStep/SpiRead` (write arms a byte, clock step
+   completes it — `SyncSPI` runs before every IO read/write — read returns
+   the last completed byte).
+
+6. **RAMRDOFF / RAMRDON softswitch address inversion — root cause of BRK crashes in Option 2 & 3.**
+   Apple IIe softswitches define `$C002` = `RAMRDOFF` (Read enable MAIN memory $0200-$BFFF)
+   and `$C003` = `RAMRDON` (Read enable AUX memory $0200-$BFFF). In `verasdformat.asm`,
+   they were mistakenly inverted (`RAMRDON = $C002`, `RAMRDOFF = $C003`). Every routine that
+   called `STA RAMRDOFF` (`CMP512`, `BUILD_ZEROS`, `SD_WRITE_SECTOR`) actually switched the
+   6502 to fetch instructions from uninitialized AUX RAM (holding `$00`), immediately executing
+   an actual `BRK` instruction at `$2901`, `$291E`, or `$2924`. Monitor broke with `*2924-` /
+   `*291E-` (seen by user as `?91e` / `?901` due to the flashing cursor over the first digit).
+   **Fixed**: `RAMRDOFF = $C002`, `RAMRDON = $C003`.
+7. **`V_ZEROMODE` bank leak in `MM_FORMAT`.** `SHOW_CHOICES` left `RAMWRT` on AUX.
+   `MM_FORMAT` stored `$00` to `V_ZEROMODE` into AUX RAM, leaving MAIN RAM holding random
+   non-zero bytes. This caused `REQUIRE_CONFIRM` to display "Wipes card" and `RF_STAGE0` to
+   trigger stage 0 (zeroing card) instead of quick formatting.
+   **Fixed**: added `STA RAMWRTOFF` before `STA V_ZEROMODE` in `MM_FORMAT`.
+8. **`SHOW_LAYOUT` pointer high bytes and `REQUIRE_CONFIRM` input cleanup.**
+   `SHOW_LAYOUT` did 32-bit math (`V_PART + V_PSIZE - 1`) without setting `ZP_PTR2HI`/`ZP_PTR3HI`
+   to page `$44`, resulting in reading garbage pages and calculating "768" instead of "204799".
+   Fixed: `SHOW_LAYOUT` now pins `ZP_PTR2HI`/`ZP_PTR3HI` to page `$44` and enforces `RAMWRTOFF`.
+   `REQUIRE_CONFIRM` now also clears `ZP_IBUF` with zeroes and pads with 8 spaces to prevent
+   residual `@` character artifacts.
+
+## Current state
+
+- **Working:**
+  - VERA Slot auto-detection (Slot 2 `$C200`, Slot 4 `$C400`).
+  - SD SPI bus initialization (CMD0, CMD8, CMD55, ACMD41, CMD16).
+  - Accurate capacity detection via CMD9/CSD (204800 sectors / 100 MiB for test card).
+  - Clean initial information screen: displays VERA slot, SPI clock, capacity, existing volume probe (MBR + VBR), and proposed FAT32 layout geometry.
+  - Main menu: [1] Catalog SD, [2] Format SD, [3] Verify SD, [0] Exit.
+  - Format confirmation screen: requires typing `FORMAT` + `RETURN`, `ESC` cancels.
+  - FAT32 formatting engine: stage-table-driven generation of MBR (type $0C starting LBA 2048), VBR, FSInfo, backup sectors, FAT #1, FAT #2, and root directory cluster.
+  - Verification engine: reads back metadata sectors via CMD17 and performs 512-byte comparison against templates.
+  - Clean ProDOS return: restores zero-page `$50-$7F`, IRQ vector, returns to 40-col, HOME clears screen.
+- **Recent fixes:**
+  - Fixed softswitch inversion: `RAMRDOFF = $C002`, `RAMRDON = $C003`. Solved BRK crash (`*2901-`, `*291E-`, `*2924-`) during Format and Verify.
+  - Fixed `V_ZEROMODE` RAMWRT bank leak in `MM_FORMAT`: ensures Option 2 defaults to quick format instead of zeroing card.
+  - Fixed ending LBA calculation in `SHOW_LAYOUT` (`2048 - 204799`).
+  - Fixed `@@@` ghost characters in confirmation prompt.
+- **In progress:**
+  - Catalog SD (Option 1): list root directory 8.3 filenames + file sizes.
+  - User verification on actual emulator / hardware runs.
+
+## Test workflow
+
+- Registry: `HKCU\Software\AppleWin\Configuration\Slot 2\SD Card Image` =
+  `C:\dev\a2vera\sdcard.img` (104857600 bytes, MBR sig $55AA, part type $0C).
+- Launch: `C:\dev\AppleWin\Release\AppleWin.exe -s2 vera -d1
+  C:\dev\verasdedit\verasdformat.po -power-on`
+- Screenshot: `powershell -NoProfile -ExecutionPolicy Bypass -File
+  'C:\dev\verasdedit\capture.ps1'` → `applewin_shot.png`. Never use `&` or
+  `pwsh -File` (execution policy blocks them).
+- **User requirement: `Stop-Process -Name AppleWin -Force` BEFORE each relaunch
+  and AFTER the final screenshot** (duplicate instances cause problems).
+- Close AppleWin before rebuilding `.po` (file lock). Never use `&&` in pwsh.
+- The 80-col display interleaves AUX/MAIN per column — some on-screen garbling
+  is expected; clean values (e.g. "00040C00") prove the pipeline works for
+  those parts.
+- **SPI ground truth via `-log`** (the primary verification channel now):
+  launch AppleWin with an extra `-log` flag — Release builds then write every
+  SPI transfer to `C:\dev\AppleWin\Release\VERA.log` (`VERASD SPI read -> $XX`
+  / `VERASD SPI write $XX (selected=1 busy=0)`). Delete the log before a run;
+  find the CMD9 frame with `Select-String 'write \$49'` and read the following
+  `read ->` lines in order (21 reads = the CSD). This is how the CSD stream
+  was verified byte-for-byte.
+- **The current model has no image input**: `read_image` on
+  `applewin_shot.png` fails ("does not declare image input"), so screenshots
+  can be captured but NOT viewed by this agent — rely on VERA.log (above) or
+  have the guest itself dump values to a readable location.
+
+## User context
+
+Communicates in Traditional Chinese — reply in TC. Explicitly told to reference
+`verasdedit.asm` (total sectors) and `a2vera/sd_diag.asm` (FAT32 root dir +
+sector reads) instead of self-debugging, and that 8-bit→32-bit FAT32 math must
+be handled carefully ("要用8-bit去算32-bit的fat32不容易").
