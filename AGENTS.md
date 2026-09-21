@@ -56,7 +56,7 @@ Successful output (current sizes):
 
 ```
 Created ...\verasdedit.po (143360 bytes)
-  VERASDEDIT.BIN: 4196 bytes (load $2000)
+  VERASDEDIT.BIN: 4491 bytes (load $2000)
   STARTUP: 783 bytes
 ```
 
@@ -127,6 +127,35 @@ to `ZPBACKUP` at `$3200`), restores the IRQ vector, switches to 40-col, forces
 `RAMWRTOFF` and calls ROM `HOME` (`$FC58`) so the `]` prompt lands on a clear
 screen.
 
+`W` write detection: `WRITE_SECTOR` reads the SD **data-response token** after
+the 512-byte write — `0x05` (accepted) → success, `0x0D` (rejected) → the SD
+is **write-protected / read-only**, and the editor shows `SD Write Protected!`
+(a generic failure still shows `SD Write failed!`). The emulator's VERA SD
+returns `0x0D` whenever `VERASD::WriteBlock` fails — e.g. the image was opened
+read-only (`rb` fallback when `r+b` fails) — so a read-only image is detected
+on write. Write protection is only checked when `W` is pressed (no proactive
+probe). `WRITE_SECTOR` returns A: 0 = success, 1 = generic fail, 2 = protected.
+A **successful write clears status row 22** (`EL_WOK` → `GOTO_ROW 22` +
+`CLEAR_LINE`) so a stale `SD Write Protected!` / `SD Write failed!` from an
+earlier attempt doesn't linger beside the fresh `Saved (clean)` indicator.
+
+**SD image change protection**: before writing, `EL_WRITE` calls
+`CHECK_SD_UNCHANGED`, which re-reads the current LBA (CMD17) into `SWAPBUF`
+(`$3800`/`$3900`) and compares it byte-for-byte against `ORIGBUF`. If they
+differ, the SD image was swapped/changed since the sector was loaded, and the
+editor shows `SD Card Changed. Force Write (y/n)?` — `Y` forces the write
+(you know the card changed and want to write anyway), `N` aborts without
+touching the new card's LBA. This stops the old card's buffered sector from
+being written to a different image's LBA.
+
+**Write-fail re-init retry**: swapping/re-attaching the SD resets the emulator's
+SPI state (`ResetSpiState` → `m_selected=false, m_is_initialized=false`), so a
+raw CMD24 right after a swap fails (R1 reads `0xFF` → generic fail). `EL_WR_GO`
+now retries a generic failure (A=1) once after re-running `SD_INIT` (re-select +
+CMD0/8/55/41/16); only a second failure shows `SD Write failed!`. Write-protect
+(A=2, token `0x0D`) is not retried — a genuinely rejected write won't be fixed
+by re-init.
+
 Edited bytes show **inverse**, the cursor cell **flashes** — `PUTCH` supports
 three display modes (`ZP_DISPMODE`: 0=normal `|0x80`, 1=inverse `&0x3F`,
 2=flash `&0x3F|0x40`; the 80-col flash bit is bit6 with bit7 clear). A 32-byte
@@ -183,9 +212,10 @@ mode.
    at `$2E02` after any byte edit. SCRATCH was moved up again when the TOTAL
    (CMD9/CSD) feature was added, and the sector buffers were relocated when the
    `P`-wrap (`PREV_LBA`) feature pushed the code past `$3000`. Current layout
-   (code 4196 bytes, end `$3064`): SCRATCH `$3300`, DIRTYMAP `$3310`, TOTBUFF/CSD
+   (code 4491 bytes, end `$318B`): SCRATCH `$3300`, DIRTYMAP `$3310`, TOTBUFF/CSD
    `$3330`–`$3336`, NEXTTMP `$3337`, ZPBACKUP `$3200`, ORIGBUF `$3400`, sector
-   buffers `SECTOR0`=`$3600`/`SECTOR1`=`$3700`. **The code must never overlap the
+   buffers `SECTOR0`=`$3600`/`SECTOR1`=`$3700`, SWAPBUF `$3800`/`$3900` (the
+   SD-changed check's re-read buffer). **The code must never overlap the
    lowest buffer, ZPBACKUP (`$3200`)** — re-check that code end (`load + length`)
    stays below it when adding code.
 4. **Subroutine A-clobber pitfall.** `HEX_DISPMODE`/`ASCII_DISPMODE` use A as a

@@ -77,6 +77,8 @@ CSDHI        = $3336          ; CMD9 CSD c_size high byte (top 6 bits)
 NEXTTMP      = $3337          ; 4-byte scratch: Total-1 (last sector) for NEXT_LBA wrap check
 SECTOR0      = $3600          ; sector buffer page 0 (bytes 0-255) — moved up so the code
 SECTOR1      = $3700          ; can grow past $3000 without overwriting sector data (page 1, bytes 256-511)
+SWAPBUF      = $3800          ; 512-byte temp: re-read of the current LBA for the SD-changed check
+SWAPBUF1     = $3900          ; SWAPBUF page 1 (bytes 256-511)
 
 ; VERA card registers (Slot 2: $C200-$C2FF)
 VERA_ADDR_L  = $C200
@@ -1337,7 +1339,7 @@ TOGGLE_PAGE:
 ; String messages
 ; ---------------------------------------------------------------------------
 MSG1:
-    ASC "VeraSDEdit (Hex Sector Editor)  v1.01 by anomixer 2026"
+    ASC "VeraSDEdit (Hex Sector Editor)  v1.02 by anomixer 2026"
     !BYTE $0D, 0
 MSG_HEAD:
     ASC "Offset 00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F   ASCII Dump"
@@ -1371,6 +1373,12 @@ MSG_SAVED:
     !BYTE 0
 MSG_WFAIL:
     ASC "SD Write failed!"
+    !BYTE 0
+MSG_WP:
+    ASC "SD Write Protected!"
+    !BYTE 0
+MSG_FORCE:
+    ASC "SD Card Changed. Force Write (y/n)?"
     !BYTE 0
 MSG_NO_VERA:
     ASC "No VERA Card Detected on Slot 2 or 4!"
@@ -1460,6 +1468,20 @@ PRINT_MSG_WFAIL:
     LDA #<MSG_WFAIL
     STA ZP_PTR
     LDA #>MSG_WFAIL
+    STA ZP_PTRHI
+    JSR PRINT_STRING
+    RTS
+PRINT_MSG_WP:
+    LDA #<MSG_WP
+    STA ZP_PTR
+    LDA #>MSG_WP
+    STA ZP_PTRHI
+    JSR PRINT_STRING
+    RTS
+PRINT_MSG_FORCE:
+    LDA #<MSG_FORCE
+    STA ZP_PTR
+    LDA #>MSG_FORCE
     STA ZP_PTRHI
     JSR PRINT_STRING
     RTS
@@ -1966,11 +1988,76 @@ CO_LOOP1:
     RTS
 
 ; ---------------------------------------------------------------------------
+; CHECK_SD_UNCHANGED: re-read the current LBA from the SD card and compare it
+; against ORIGBUF (the pristine copy from the last successful load). If they
+; differ, the SD image was swapped/changed since we loaded — return C=0 so the
+; caller aborts the write (otherwise we'd write the old card's data to a
+; different image's LBA). Returns C=1 if the SD still holds the same sector.
+; Clobbers A, X, Y.
+; ---------------------------------------------------------------------------
+CHECK_SD_UNCHANGED:
+    LDA #$00
+    STA RAMWRTOFF           ; write MAIN so SWAPBUF goes to the right bank
+    ; CMD17 read current LBA into SWAPBUF
+    LDA #$51
+    JSR SPI_SEND_A
+    LDA ZP_LBA3
+    JSR SPI_SEND_A
+    LDA ZP_LBA2
+    JSR SPI_SEND_A
+    LDA ZP_LBA1
+    JSR SPI_SEND_A
+    LDA ZP_LBA0
+    JSR SPI_SEND_A
+    LDA #$FF
+    JSR SPI_SEND_A
+    JSR SPI_READ_A          ; R1
+    BNE CH_FAIL             ; read failed -> treat as changed (abort write)
+    JSR SPI_READ_A          ; data token
+    CMP #$FE
+    BNE CH_FAIL
+    LDX #$00
+CH_LOOP0:
+    JSR SPI_READ_A
+    STA SWAPBUF, X
+    INX
+    BNE CH_LOOP0
+    LDX #$00
+CH_LOOP1:
+    JSR SPI_READ_A
+    STA SWAPBUF1, X
+    INX
+    BNE CH_LOOP1
+    ; compare SWAPBUF vs ORIGBUF (512 bytes)
+    LDX #$00
+CH_CMP0:
+    LDA SWAPBUF, X
+    CMP ORIGBUF, X
+    BNE CH_CHANGED
+    INX
+    BNE CH_CMP0
+    LDX #$00
+CH_CMP1:
+    LDA SWAPBUF1, X
+    CMP ORIGBUF+$100, X
+    BNE CH_CHANGED
+    INX
+    BNE CH_CMP1
+    SEC                     ; unchanged
+    RTS
+CH_CHANGED:
+CH_FAIL:
+    CLC                     ; changed / read failed
+    RTS
+
+; ---------------------------------------------------------------------------
 ; Write the current sector (LBA) back to the SD card via CMD24.
-; Returns A=0 on success, non-zero on failure (R1 != 0).
+; Returns A: 0 = success (token 0x05), 1 = generic failure (R1 != 0 or bad
+; token), 2 = SD write protected / write rejected (token 0x0D).
 ;   CMD24 0x58 + LBA3..LBA0 + CRC(0xFF) -> R1
 ;   start token 0xFE + 512 data bytes + 2 CRC bytes
 ;   (emulator writes once it has received 515 bytes: token+data+CRC)
+;   data response token: 0x05 = accepted, 0x0D = rejected (write-protected)
 ; ---------------------------------------------------------------------------
 WRITE_SECTOR:
     LDA #$00
@@ -2009,15 +2096,56 @@ WS_LOOP1:
     JSR SPI_SEND_A
     LDA #$FF
     JSR SPI_SEND_A
-    ; wait for the card to finish (busy: reads 0x00 until done)
+    ; wait for the card to finish (busy: reads 0x00 until done), then read the
+    ; data response token: 0x05 = accepted, 0x0D = rejected (write-protected).
 WS_BUSY:
     JSR SPI_READ_A
     CMP #$00
     BEQ WS_BUSY
+    CMP #$05
+    BEQ WS_OK               ; 0x05 -> data accepted
+    CMP #$0D
+    BEQ WS_WP               ; 0x0D -> data rejected (write protected / error)
+    LDA #$01                ; unexpected token -> generic failure
+    RTS
+WS_WP:
+    LDA #$02                ; SD write protected (0x0D)
+    RTS
+WS_OK:
     LDA #$00                ; success
     RTS
 WS_FAIL:
     LDA #$01
+    RTS
+
+; ---------------------------------------------------------------------------
+; PROMPT_FORCE_WRITE: the SD image changed since we loaded (CHECK_SD_UNCHANGED
+; failed). Show "SD Card Changed. Force Write (y/n)?" and read the
+; response. Returns C=1 if the user chose Y (force the write), C=0 if N
+; (abort). Clobbers A. The prompt line (row 22) is cleared by the caller.
+; ---------------------------------------------------------------------------
+PROMPT_FORCE_WRITE:
+    ; clear row 22, then show the prompt
+    LDA #22
+    JSR GOTO_ROW
+    JSR CLEAR_LINE
+    LDA #22
+    JSR GOTO_ROW
+    JSR PRINT_MSG_FORCE
+PFW_LOOP:
+    JSR READ_KEY
+    BEQ PFW_LOOP
+    JSR NORMKEY
+    CMP #$59                ; 'Y'
+    BEQ PFW_YES
+    CMP #$4E                ; 'N'
+    BEQ PFW_NO
+    JMP PFW_LOOP            ; any other key: keep waiting
+PFW_YES:
+    SEC
+    RTS
+PFW_NO:
+    CLC
     RTS
 
 ; ---------------------------------------------------------------------------
@@ -2069,13 +2197,52 @@ EL_NAV_KEYS:
     CMP #$77                ; 'w' write (lowercase)
     BNE EL_NOT_W
 EL_WRITE:
+    ; Safety: re-read the sector and compare against ORIGBUF. If the SD image
+    ; was swapped/changed since we loaded, prompt for a forced write instead of
+    ; blindly writing the old card's data to a different image's LBA.
+    JSR CHECK_SD_UNCHANGED
+    BCS EL_WR_GO              ; SD unchanged -> write normally
+    JSR PROMPT_FORCE_WRITE    ; "SD Card Changed. Force Write (y/n)?"
+    BCC EL_WR_ABORT           ; user said no -> abort the write
+EL_WR_GO:
     JSR WRITE_SECTOR
-    BNE EL_WFAIL            ; A != 0 -> fail
+    BEQ EL_WOK
+    CMP #$02
+    BEQ EL_WP
+    ; generic failure: the SD may have been swapped / re-attached, which resets
+    ; the SPI state (deselect + uninitialized). Re-run SD_INIT (re-select +
+    ; CMD0/8/55/41/16) and retry the write once; only report failure if the
+    ; retry still fails.
+    JSR SD_INIT
+    JSR WRITE_SECTOR
+    BEQ EL_WOK
+    CMP #$02
+    BEQ EL_WP
+    JMP EL_WFAIL
+EL_WR_ABORT:
+    ; user cancelled the force write: clear the prompt line and stay
+    LDA #22
+    JSR GOTO_ROW
+    JSR CLEAR_LINE
+    JMP EDIT_LOOP
+EL_WP:
+    ; SD is write protected: show the specific message
+    LDA #22
+    JSR GOTO_ROW
+    JSR PRINT_MSG_WP
+    JMP EDIT_LOOP
+EL_WOK:
     LDA #$00
     STA ZP_DIRTY
     JSR CLEAR_DIRTY          ; all bytes written -> clear the dirty map
     JSR COPY_ORIG            ; written bytes are now the new original
     JSR UPDATE_DIRTY
+    ; clear the stale status row 22 (e.g. a previous "SD Write Protected!" /
+    ; "SD Write failed!" from an earlier attempt) so it doesn't linger beside
+    ; the fresh "Saved (clean)" indicator.
+    LDA #22
+    JSR GOTO_ROW
+    JSR CLEAR_LINE
     JSR DRAW_DATA
     JMP EDIT_LOOP
 EL_WFAIL:
