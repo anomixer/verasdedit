@@ -1,0 +1,10 @@
+﻿{
+  "name": "verasdtool",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node src/verasdedit/verasdedit.mjs && node src/verasdformat/verasdformat.mjs",
+    "build:verasdedit": "node src/verasdedit/verasdedit.mjs",
+    "build:verasdformat": "node src/verasdformat/verasdformat.mjs"
+  }
+}

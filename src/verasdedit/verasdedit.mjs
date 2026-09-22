@@ -1,13 +1,15 @@
 import fs from "fs"
 import path from "path"
+import { execFileSync } from "child_process"
 import { fileURLToPath } from "url"
-import { assemble6502 } from "./asm6502.mjs"
-import { compileApplesoftBasic } from "./applebasic.mjs"
+import { assemble6502 } from "../asm6502.mjs"
+import { compileApplesoftBasic } from "../applebasic.mjs"
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 // Base ProDOS 2.4.3 disk image, vendored in this repo under base/ (the build
 // script below frees all existing user files, keeping only PRODOS+SYSTEM).
-const basePoPath = path.join(__dirname, "base", "ProDOS_2_4_3.po")
+const repoRoot = path.resolve(__dirname, "..", "..")
+const basePoPath = path.join(repoRoot, "assets", "ProDOS_2_4_3.po")
 
 // Assemble VERASDEDIT (load $2000)
 const asmLines = fs.readFileSync(path.join(__dirname, "verasdedit.asm"), "utf-8").split(/\r?\n/)
@@ -155,8 +157,23 @@ const buildProDosDisk = () => {
   return disk
 }
 
-const outPath = path.join(__dirname, "verasdedit.po")
-fs.writeFileSync(outPath, buildProDosDisk())
+const outPath = path.join(repoRoot, "verasdedit.po")
+const writePo = (target, data) => {
+  try {
+    fs.writeFileSync(target, data)
+  } catch (err) {
+    const locked = err?.code === "EPERM" || err?.code === "EACCES" || err?.code === "EBUSY"
+    if (!locked || process.platform !== "win32") throw err
+    console.warn("verasdedit.po is locked; terminating AppleWin and retrying...")
+    try {
+      execFileSync("taskkill", ["/IM", "AppleWin.exe", "/F"], { stdio: "ignore" })
+    } catch {
+      // AppleWin may already have exited; the retry below gives the real error.
+    }
+    fs.writeFileSync(target, data)
+  }
+}
+writePo(outPath, buildProDosDisk())
 console.log(`Created ${outPath} (143360 bytes)`)
 console.log(`  VERASDEDIT.BIN: ${verasdedit.length} bytes (load $2000)`)
 console.log(`  STARTUP: ${startup.length} bytes`)

@@ -1,6 +1,6 @@
 import fs from 'fs';
-import { assemble6502 } from './asm6502.mjs';
-const lines = fs.readFileSync('verasdformat.asm','utf8').split(/\r?\n/);
+import { assemble6502 } from '../asm6502.mjs';
+const lines = fs.readFileSync(new URL('./verasdformat.asm', import.meta.url),'utf8').split(/\r?\n/);
 let labels = {};
 const bin = assemble6502(lines, 0x2000, labels);
 console.log('Binary length:', bin.length, 'bytes');

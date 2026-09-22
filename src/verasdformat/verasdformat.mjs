@@ -6,12 +6,14 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { assemble6502 } from "./asm6502.mjs";
-import { compileApplesoftBasic } from "./applebasic.mjs";
+import { assemble6502 } from "../asm6502.mjs";
+import { compileApplesoftBasic } from "../applebasic.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const basePoPath = path.join(__dirname, "base", "ProDOS_2_4_3.po");
+const repoRoot = path.resolve(__dirname, "..", "..");
+const basePoPath = path.join(repoRoot, "assets", "ProDOS_2_4_3.po");
 
 // ---------------------------------------------------------------- assemble
 const asmLines = fs
@@ -19,16 +21,16 @@ const asmLines = fs
   .split(/\r?\n/);
 const bin = assemble6502(asmLines, 0x2000);
 
-if (bin.length > 0x2000) {
+if (bin.length > 0x6000) {
   throw new Error(
-    `Code too large: ${bin.length} bytes > 0x2000 (the program must live entirely inside $2000-$3FFF, above it sit the scratch buffers at $4000)`
+    `Code too large: ${bin.length} bytes > 0x6000 (the program must live entirely inside $2000-$7FFF)`
   );
 }
 
 // ------------------------------------------------------------------ startup
 const startup = compileApplesoftBasic(
   __dirname,
-  path.join(__dirname, "verasdformat_startup.bas")
+  path.join(__dirname, "startup.bas")
 );
 
 // --------------------------------------------------------------- disk build
@@ -171,7 +173,7 @@ const buildProDosDisk = () => {
     }
   };
 
-  addFile("VERASDFMT.BIN", 0x06, 0x2000, bin);
+  addFile("VERASDFORMAT", 0x06, 0x2000, bin);
   addFile("STARTUP", 0xfc, 0x0801, startup);
 
   disk[2 * 512 + 0x25] = fileCount & 0xff;
@@ -180,8 +182,23 @@ const buildProDosDisk = () => {
   return disk;
 };
 
-const outPath = path.join(__dirname, "verasdformat.po");
-fs.writeFileSync(outPath, buildProDosDisk());
+const outPath = path.join(repoRoot, "verasdformat.po");
+const writePo = (target, data) => {
+  try {
+    fs.writeFileSync(target, data);
+  } catch (err) {
+    const locked = err?.code === "EPERM" || err?.code === "EACCES" || err?.code === "EBUSY";
+    if (!locked || process.platform !== "win32") throw err;
+    console.warn("verasdformat.po is locked; terminating AppleWin and retrying...");
+    try {
+      execFileSync("taskkill", ["/IM", "AppleWin.exe", "/F"], { stdio: "ignore" });
+    } catch {
+      // AppleWin may already have exited; the retry below gives the real error.
+    }
+    fs.writeFileSync(target, data);
+  }
+};
+writePo(outPath, buildProDosDisk());
 console.log(`Created ${outPath} (143360 bytes)`);
-console.log(`  VERASDFMT.BIN: ${bin.length} bytes (load $2000)`);
+console.log(`  VERASDFORMAT: ${bin.length} bytes (load $2000)`);
 console.log(`  STARTUP: ${startup.length} bytes`);

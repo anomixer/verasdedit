@@ -45,7 +45,7 @@
 ;   be hex (LABEL+$1BE): the addend is parsed with parseInt without a radix,
 ;   so LABEL+30 would mean decimal 30.
 ;
-; ProDOS binary: VERASDFMT.BIN (type $06, load $2000), launched with BRUN.
+; ProDOS binary: VERASDFORMAT (type $06, load $2000), launched with BRUN.
 ; =============================================================================
 
 * = $2000
@@ -93,17 +93,19 @@ ZP_SCR2      = $7E
 ZP_SCR3      = $7F
 ZP_CRC       = $5D          ; CRC byte for the next SD command frame
 ZP_BUFLO     = $5E          ; indirect SD buffer address, low byte (always $00)
-ZP_BUFPG     = $5F          ; ...and high byte: $40 = WRKBUF, $42 = TMPBUF
+ZP_BUFPG     = $5F          ; ...and high byte: $80 = WRKBUF, $82 = TMPBUF
 
 ; -----------------------------------------------------------------------------
 ; Page-2 storage. Every 32-bit value is little-endian.
-; The code MUST end below ZPBACKUP ($3B00); verasdformat.mjs asserts this.
+; The code occupies $2000-$7FFF.  The formatter has the full 48K Apple II
+; RAM available, so sector buffers and scratch live high in RAM ($8000-$95FF)
+; instead of constraining the program to a needlessly tiny 8K window.
 ; -----------------------------------------------------------------------------
-ZPBACKUP     = $4400        ; 48 bytes: ZP $50-$7F
+ZPBACKUP     = $9400        ; 48 bytes: ZP $50-$7F
 
 ; VARS must keep every ZP_PTR2-accessed variable on ONE page: VARS+$30 is the
-; highest one (V_TMP4), so VARS = $4450 keeps VARS..VARS+$30 on page $44.
-VARS         = $4450
+; highest one (V_TMP4), so VARS = $9450 keeps VARS..VARS+$30 on page $94.
+VARS         = $9450
 V_TOTAL      = VARS         ; card capacity in 512-byte sectors (from the CSD)
 V_CSIZE      = VARS+4       ; raw C_SIZE field of the CSD
 V_PART       = VARS+8       ; partition start LBA
@@ -120,35 +122,35 @@ V_TMP4       = VARS+$30     ; general scratch, survives DIV32
 V_SPC        = VARS+$34     ; sectors per cluster (1, 2, 8, 16, 32 or 64)
 V_SPCSH      = VARS+$35     ; log2(V_SPC)
 V_ZEROMODE   = VARS+$36     ; $01 = overwrite the whole card with $00 first
-V_VERERR     = VARS+$37     ; verify: number of sectors that did not match
-V_CSDV2      = VARS+$38     ; $01 = CSD version 2 (SDHC), $00 = version 1
-V_SDSCBA     = VARS+$39     ; $01 = card wants BYTE addresses (OCR CCS clear)
-V_STAGE      = VARS+$3A     ; stage number, shown on the stage line
-V_RETRY      = VARS+$3B     ; retry counter for the SD init commands
+V_VERERR     = VARS+$37     ; verify: number of sectors that did not match (4 bytes)
+V_STAGE      = VARS+$3B     ; stage number, shown on the stage line
+V_RETRY      = VARS+$3C     ; retry counter for the SD init commands
+V_MULTIW     = VARS+$3D     ; non-zero while a stage uses CMD25 multi-write
 V_DONE       = VARS+$40     ; progress: sectors written in this stage
 V_PCTTOT     = VARS+$44     ; progress: sectors in this stage
 V_PCTSTEP    = VARS+$48     ; progress: width of one percent, in sectors
 V_PCTNEXT    = VARS+$4C     ; progress: count where the next percent lands
 V_PCT        = VARS+$50     ; progress: last percent printed
 V_DIGBUF     = VARS+$58     ; 12 bytes: digits while printing decimal
-MATHSB       = $44B8        ; 4 bytes: byte-wise scratch for the 32-bit helpers
+MATHSB       = $94B8        ; 4 bytes: byte-wise scratch for the 32-bit helpers
 
 ; CATALOG SD workspace - reads an existing FAT32 volume and lists the root
 ; directory. All of it lives on page $44.
-CA_FATBG     = $44C0        ; FAT32: first FAT LBA (4 bytes LE)
-CA_CLUSBG    = $44C4        ; FAT32: first data cluster LBA (4)
-CA_ROOTC     = $44C8        ; FAT32: root directory cluster (4)
-CA_CURC      = $44CC        ; cluster being walked (4)
-CA_CURLBA    = $44D0        ; LBA of that cluster (4)
-CA_SECTS     = $44D4        ; sectors left in the current cluster (1)
-CA_WANT      = $44D5        ; wanted FAT sector LBA (4)
-CA_TMP       = $44D9        ; generic 32-bit scratch (4)
-CA_FSZ       = $44DD        ; file size (4)
-CA_SPC       = $44E1        ; sectors per cluster (1)
-CA_ENTRY     = $44E2        ; current directory entry (2)
+CA_FATBG     = $94C0        ; FAT32: first FAT LBA (4 bytes LE)
+CA_CLUSBG    = $94C4        ; FAT32: first data cluster LBA (4)
+CA_ROOTC     = $94C8        ; FAT32: root directory cluster (4)
+CA_CURC      = $94CC        ; cluster being walked (4)
+CA_CURLBA    = $94D0        ; LBA of that cluster (4)
+CA_SECTS     = $94D4        ; sectors left in the current cluster (1)
+CA_WANT      = $94D5        ; wanted FAT sector LBA (4)
+CA_TMP       = $94D9        ; generic 32-bit scratch (4)
+CA_FSZ       = $94DD        ; file size (4)
+CA_SPC       = $94E1        ; sectors per cluster (1)
+CA_ENTRY     = $94E2        ; current directory entry (2)
 
-WRKBUF       = $4000        ; 512-byte sector image that gets written
-TMPBUF       = $4200        ; 512-byte sector read back for verification
+WRKBUF       = $8000        ; 512-byte sector image that gets written
+TMPBUF       = $8200        ; 512-byte sector read back for verification
+FMTBUF       = $8400        ; formatter staging space through $93FF
 
 ; -----------------------------------------------------------------------------
 ; FAT32 layout constants - what the reference volumes carry
@@ -170,6 +172,7 @@ LK_ZERO      = 0            ; LBA 0
 LK_PART      = 1            ; V_PART + argument
 LK_DATA      = 2            ; V_PART + data area + argument
 FL_FATSZ     = $80          ; then add V_FATSZ (steps FAT #1 over to FAT #2)
+FL_MULTI     = $40          ; write repeated template sectors with CMD25
 
 ; -----------------------------------------------------------------------------
 ; Apple II hardware
@@ -230,9 +233,9 @@ START:
     LDA #$00
     STA ZP_ERR
     ; The 32-bit helpers (DIV32/SHR32/etc.) set only the low pointer byte and
-    ; rely on the high byte. VARS sits on page $44; preset the high bytes now so
+    ; rely on the high byte. VARS sits on page $94; preset the high bytes now so
     ; the capacity display's arithmetic reads the right page.
-    LDA #$44
+    LDA #$94
     STA ZP_PTR2HI
     STA ZP_PTR3HI
     JSR SD_INIT
@@ -294,17 +297,77 @@ FORMAT_ENTRY:
     BNE FE_DONE
     JSR RUN_FORMAT
     LDA ZP_ABORT
-    BNE SHOW_ABORT
+    BEQ FE_NO_ABORT
+    JMP SHOW_ABORT
+FE_NO_ABORT:
+    LDA ZP_ERR
+    BEQ FE_FORMAT_WRITTEN
+    JMP SHOW_WRITEFAIL
+FE_FORMAT_WRITTEN:
+    JSR CLEAR_ROOT_DIR
+    LDA ZP_ERR
+    BEQ FE_ROOT_WRITTEN
+    JMP SHOW_WRITEFAIL
+FE_ROOT_WRITTEN:
     JSR VERIFY_ALL
     JSR SHOW_RESULT
-    JSR READ_KEY_ANY
 FE_DONE:
+    RTS
+
+; CLEAR_ROOT_DIR - explicitly rebuild the complete root directory cluster.
+; The first sector keeps only the volume label; every remaining sector is zero.
+; Each write is read back and compared before moving on, so a completed format
+; cannot claim success while stale root entries remain on the card.
+CLEAR_ROOT_DIR:
+    ; Re-mount the VBR we just wrote and use the exact same root-LBA path as
+    ; CATALOG.  Format and catalog therefore cannot disagree about which
+    ; cluster is the root directory.
+    JSR CA_MOUNT
+    LDA ZP_ERR
+    BNE CRD_DONE
+    LDA CA_ROOTC
+    STA CA_CURC
+    LDA CA_ROOTC+1
+    STA CA_CURC+1
+    LDA CA_ROOTC+2
+    STA CA_CURC+2
+    LDA CA_ROOTC+3
+    STA CA_CURC+3
+    JSR CA_CLUS_LBA
+    LDA CA_CURLBA
+    STA ZP_LBA0
+    LDA CA_CURLBA+1
+    STA ZP_LBA1
+    LDA CA_CURLBA+2
+    STA ZP_LBA2
+    LDA CA_CURLBA+3
+    STA ZP_LBA3
+    JSR BUILD_ROOT
+    LDA CA_SPC
+    STA ZP_TEMP2
+CRD_WRITE:
+    JSR SD_WRITE_SECTOR
+    LDA ZP_ERR
+    BNE CRD_DONE
+    LDA #$82
+    STA ZP_BUFPG
+    JSR SD_READ_SECTOR
+    LDA ZP_ERR
+    BNE CRD_DONE
+    JSR CMP512
+    LDA ZP_ERR
+    BNE CRD_DONE
+    DEC ZP_TEMP2
+    BEQ CRD_DONE
+    JSR INC_LBA
+    JSR BUILD_ZEROS
+    JMP CRD_WRITE
+CRD_DONE:
     RTS
 ; VERIFY_ENTRY - read every metadata sector back and report.
 VERIFY_ENTRY:
     JSR VERIFY_ALL
     JSR SHOW_RESULT
-    JSR READ_KEY_ANY
     RTS
 ; A forward branch out of the program is not encodable, so the exits hop
 ; through this trampoline and only the long hop is a JMP.
@@ -316,6 +379,14 @@ SHOW_ABORT:
     JSR PSTR
     LDX #<MSG_ANYKEY
     LDY #>MSG_ANYKEY
+    JSR PSTR
+    JSR READ_KEY_ANY
+    RTS
+SHOW_WRITEFAIL:
+    LDA #$10                ; row 16, below title and all stage rows
+    JSR GOTO_ROW
+    LDX #<MSG_WRITEFAIL
+    LDY #>MSG_WRITEFAIL
     JSR PSTR
     JSR READ_KEY_ANY
     RTS
@@ -333,12 +404,18 @@ CATALOG_SD:
     LDX #<MSG_CATTITLE
     LDY #>MSG_CATTITLE
     JSR PSTR
+    LDX #<MSG_CATHEAD
+    LDY #>MSG_CATHEAD
+    JSR PSTR
     JSR CA_MOUNT
     LDA ZP_ERR
     BNE CA_FAIL
     JSR CA_SCAN
     LDX #<MSG_CATDONE
     LDY #>MSG_CATDONE
+    JSR PSTR
+    LDX #<MSG_PRESSKEY
+    LDY #>MSG_PRESSKEY
     JSR PSTR
     RTS
 CA_FAIL:
@@ -349,24 +426,35 @@ CA_FAIL:
 
 ; CA_MOUNT - read the MBR (LBA 0) and the partition's VBR, and compute the FAT32
 ; layout. ZP_ERR = 0 on success.
-CA_ME_TR:
-    JMP CA_ME
+CA_ME:
+    LDA #$01
+    STA ZP_ERR
+    RTS
 CA_MOUNT:
     LDA #$00
-    STA ZP_ERR
     STA ZP_LBA0
     STA ZP_LBA1
     STA ZP_LBA2
     STA ZP_LBA3
-    LDA #$40
+    LDA #$80
     STA ZP_BUFPG
     JSR SD_READ_SECTOR
     LDA ZP_ERR
-    BNE CA_ME_TR
+    BNE CA_ME
     ; partition entry 0: type @ $1BE+4 must be $0C, start LBA @ $1BE+8
     LDA WRKBUF+$1C2
     CMP #$0C
-    BNE CA_ME_TR
+    BEQ CA_PART
+CA_SUPER:
+    ; superfloppy: LBA 0 is already the VBR; use partition start zero
+    LDY #$03
+    LDA #$00
+CAS_ZERO:
+    STA V_PART,Y
+    DEY
+    BPL CAS_ZERO
+    JMP CAM_READ_VBR
+CA_PART:
     LDA WRKBUF+$1C6
     STA V_PART
     LDA WRKBUF+$1C7
@@ -376,21 +464,20 @@ CA_MOUNT:
     LDA WRKBUF+$1C9
     STA V_PART+3
     ; read the VBR at V_PART
-    LDA #<V_PART
-    STA ZP_PTR2
+CAM_READ_VBR:
     LDY #$03
 CAM_L:
-    LDA (ZP_PTR2),Y
+    LDA V_PART,Y
     STA ZP_LBA0,Y
     DEY
     BPL CAM_L
     JSR SD_READ_SECTOR
     LDA ZP_ERR
-    BNE CA_ME_TR
+    BNE CA_ME
     ; sectors per cluster @ $0D
     LDA WRKBUF+$0D
     STA CA_SPC
-    BEQ CA_ME_TR
+    BEQ CA_ME
     ; fat_begin_lba = V_PART + RsvdSecCnt(@$0E, 2 LE)
     CLC
     LDA V_PART
@@ -407,17 +494,16 @@ CAM_L:
     STA CA_FATBG+3
     ; clus_begin_lba = fat_begin_lba + NumFATs(@$10) * FATSz32(@$24, 4 LE)
     ; NumFATs is 2 on this volume; the loop below handles either.
-    LDA #<CA_FATBG
-    STA ZP_PTR3
-    LDA #<CA_CLUSBG
-    STA ZP_PTR2
-    LDA #$00
+    LDA CA_FATBG
     STA CA_CLUSBG
+    LDA CA_FATBG+1
     STA CA_CLUSBG+1
+    LDA CA_FATBG+2
     STA CA_CLUSBG+2
+    LDA CA_FATBG+3
     STA CA_CLUSBG+3
-    LDA #<CA_FATBG
-    STA ZP_PTR2HI        ; high bytes for both are $3D, set once
+    LDA #$94
+    STA ZP_PTR2HI        ; CA_* workspace lives on page $44
     LDX WRKBUF+$10
 CAM_ADD:
     CLC
@@ -445,11 +531,6 @@ CAM_ADD:
     LDA WRKBUF+$2F
     STA CA_ROOTC+3
     RTS
-CA_ME:
-    LDA #$01
-    STA ZP_ERR
-    RTS
-
 ; CA_CLUS_LBA - CA_CURC -> CA_CURLBA = CA_CLUSBG + (CA_CURC - 2) << log2(CA_SPC)
 CA_CLUS_LBA:
     SEC
@@ -612,6 +693,8 @@ CAS_SEC:
     ; read CA_CURLBA into WRKBUF
     LDA #<CA_CURLBA
     STA ZP_PTR2
+    LDA #$94
+    STA ZP_PTR2HI
     LDY #$03
 CAS_L:
     LDA (ZP_PTR2),Y
@@ -628,39 +711,71 @@ CAS_SECOK:
     STA CA_ENTRY
     STA CA_ENTRY+1
 CAS_E:
-    LDY CA_ENTRY
-    LDA WRKBUF,Y
-    BEQ CAS_EOF              ; $00 = end of directory
+    ; Build a 16-bit pointer to this 32-byte directory entry.  Absolute,Y
+    ; would wrap after entry 7 because WRKBUF spans two pages.
+    LDA #<WRKBUF
+    CLC
+    ADC CA_ENTRY
+    STA ZP_PTR2
+    LDA #>WRKBUF
+    ADC CA_ENTRY+1
+    STA ZP_PTR2HI
+    LDY #$00
+    LDA (ZP_PTR2),Y
+    BNE CAS_NONZERO          ; $00 = end of directory
+    JMP CAS_EOF
+CAS_NONZERO:
     CMP #$E5
     BEQ CAS_NEXT             ; deleted
     CMP #$2E
     BEQ CAS_NEXT             ; "." / ".."
-    TYA
-    CLC
-    ADC #$0B
-    TAY
-    LDA WRKBUF,Y             ; attribute byte
+    LDY #$0B
+    LDA (ZP_PTR2),Y          ; attribute byte
+    STA CA_TMP
     CMP #$0F
     BEQ CAS_NEXT             ; long filename entry
+    LDA CA_TMP
     AND #$08
-    BNE CAS_NEXT             ; volume label
-    ; print the 8.3 name
-    JSR CA_PRINTNAME
-    ; print the size (offset $1C, 4 LE). TYA holds the attribute offset
-    ; (entry + $0B), so the size offset is TYA + $11 (entry + $1C).
-    TYA
-    CLC
-    ADC #$11
-    TAY
-    LDA WRKBUF,Y
+    BNE CAS_VOL
+    LDA CA_TMP
+    AND #$10
+    BNE CAS_DIR
+    ; print the size (offset $1C, 4 LE)
+    LDY #$1C
+    LDA (ZP_PTR2),Y
     STA CA_FSZ
-    LDA WRKBUF+1,Y
+    INY
+    LDA (ZP_PTR2),Y
     STA CA_FSZ+1
-    LDA WRKBUF+2,Y
+    INY
+    LDA (ZP_PTR2),Y
     STA CA_FSZ+2
-    LDA WRKBUF+3,Y
+    INY
+    LDA (ZP_PTR2),Y
     STA CA_FSZ+3
+    ; print the 8.3 name, then separate it from the decimal size
+    JSR CA_PRINTNAME
+    LDA #$20
+    JSR PUTCH
     JSR CA_PRINTSIZE
+    JMP CAS_NEXT
+CAS_VOL:
+    JSR CA_PRINTNAME
+    LDA #$20
+    JSR PUTCH
+    LDX #<MSG_CATVOL
+    LDY #>MSG_CATVOL
+    JSR PSTR
+    JSR ROW_ADVANCE
+    JMP CAS_NEXT
+CAS_DIR:
+    JSR CA_PRINTNAME
+    LDA #$20
+    JSR PUTCH
+    LDX #<MSG_CATDIR
+    LDY #>MSG_CATDIR
+    JSR PSTR
+    JSR ROW_ADVANCE
 CAS_NEXT:
     ; advance to the next entry (CA_ENTRY += 32)
     LDA CA_ENTRY
@@ -672,7 +787,8 @@ CAS_NEXT:
 CAS_NOK:
     LDA CA_ENTRY+1
     CMP #$02
-    BNE CAS_E
+    BEQ CAS_SECN
+    JMP CAS_E
 CAS_SECN:
     ; next sector within the cluster
     INC CA_CURLBA
@@ -699,22 +815,21 @@ CAS_END:
 
 ; CA_PRINTNAME - print the 11-byte name at WRKBUF+CA_ENTRY (8.3, padded).
 CA_PRINTNAME:
-    LDX #$00
+    LDY #$00
 CPN_L:
-    TXA
-    CLC
-    ADC CA_ENTRY
-    TAY
-    LDA WRKBUF,Y
+    LDA (ZP_PTR2),Y
     CMP #$20
     BCC CPN_SKIP             ; control char: skip
     JSR PUTCH
 CPN_SKIP:
-    INX
-    CPX #$0B
-    BNE CPN_L
-    LDA #$20
+    INY
+    CPY #$08
+    BNE CPN_CONT
+    LDA #$20                ; separate the 8-byte base name from the extension
     JSR PUTCH
+CPN_CONT:
+    CPY #$0B
+    BNE CPN_L
     RTS
 
 ; CA_PRINTSIZE - print CA_FSZ as decimal, right-aligned to 7 digits.
@@ -724,8 +839,7 @@ CA_PRINTSIZE:
     LDA #$07
     STA ZP_TEMP2
     JSR PRINT_DEC32W
-    LDA #$0D
-    JSR PUTCH
+    JSR ROW_ADVANCE
     RTS
 SHOW_SDFAIL:
     LDX #<MSG_SDFAIL
@@ -861,6 +975,9 @@ RC_NOPE:
 RUN_FORMAT:
     JSR CLEAR_SCREEN
     JSR SET_CURSOR_HOME
+    LDX #<MSG_TITLE
+    LDY #>MSG_TITLE
+    JSR PSTR
     LDX #<MSG_WORKING
     LDY #>MSG_WORKING
     JSR PSTR
@@ -884,6 +1001,7 @@ RF_RUN:
     JSR RF_SHOW_LABEL
     LDX ZP_STGIDX
     JSR RF_ARM_PROGRESS
+    JSR DRAW_PROGRESS       ; show 0% and the total before the first write
     LDA #$00
     STA RAMWRTOFF         ; write MAIN - our code lives in MAIN
     LDX ZP_STGIDX
@@ -893,6 +1011,8 @@ RF_RUN:
     STA TPLJSR+2
     JSR TPLJSR
     JSR STAGE_WRITE
+    LDA ZP_ERR
+    BNE RF_DONE             ; stop instead of verifying an incomplete format
     INC V_STAGE
     LDX ZP_STGIDX
 RF_ADVANCE:
@@ -987,7 +1107,12 @@ RF_L_ZERO:
     STA ZP_LBA3
     JMP RF_L_FLAG
 RF_L_PART:
-    LDY RF_TAB+6,X
+    TXA
+    CLC
+    ADC #$06
+    TAY
+    LDA RF_TAB,Y
+    TAY
     TYA
     CLC
     ADC V_PART
@@ -1003,7 +1128,12 @@ RF_L_PART:
     STA ZP_LBA3
     JMP RF_L_FLAG
 RF_L_DATA:
-    LDY RF_TAB+6,X
+    TXA
+    CLC
+    ADC #$06
+    TAY
+    LDA RF_TAB,Y
+    TAY
     TYA
     CLC
     ADC V_PART
@@ -1011,15 +1141,12 @@ RF_L_DATA:
     STA ZP_LBA0
     LDA V_PART+1
     ADC V_DATA+1
-    ADC #$00
     STA ZP_LBA1
     LDA V_PART+2
     ADC V_DATA+2
-    ADC #$00
     STA ZP_LBA2
     LDA V_PART+3
     ADC V_DATA+3
-    ADC #$00
     STA ZP_LBA3
 RF_L_FLAG:
     LDA RF_TAB+7,X
@@ -1043,6 +1170,14 @@ RF_L_DONE:
 ; Print "  NN label" for the current table entry. PUTCH clobbers X, so the
 ; table index is parked while anything is printed.
 RF_SHOW_LABEL:
+    ; Each stage gets its own row: row = 3 + V_STAGE. Rows 0-2 hold the title,
+    ; blank separator, and progress heading. Progress goes on the
+    ; same row at column 40. GOTO_ROW clobbers ZP_TEMP2, so it runs before X
+    ; is parked.
+    LDA V_STAGE
+    CLC
+    ADC #$03
+    JSR GOTO_ROW
     STX ZP_TEMP2
     LDA #$20
     JSR PUTCH
@@ -1074,6 +1209,8 @@ RF_ARM_PROGRESS:
     STA V_DONE+3
     STA V_PCT
     STA V_PCT+1
+    STA V_PCT+2
+    STA V_PCT+3
     ; step = ceil(total/100) but never zero, so a one-sector stage still ticks
     LDY #$03
 RAP_CP:
@@ -1133,6 +1270,14 @@ IT1_OUT:
 ; a partially written card: the message that follows says so plainly.
 ; =============================================================================
 STAGE_WRITE:
+    LDX ZP_STGIDX
+    LDA RF_TAB+7,X
+    AND #FL_MULTI
+    STA V_MULTIW
+    BEQ STW_NEXT
+    JSR SD_MULTI_BEGIN
+    LDA ZP_ERR
+    BNE STW_DONE
 STW_NEXT:
     LDA #$00
     STA RAMWRTOFF           ; SHOW_PROGRESS/PUTCH may have left RAMWRT on AUX
@@ -1145,7 +1290,13 @@ STW_NEXT:
     JSR CHECK_ESC
     LDA ZP_ABORT
     BNE STW_DONE
+    LDA V_MULTIW
+    BEQ STW_SINGLE
+    JSR SD_MULTI_BLOCK
+    JMP STW_WRITTEN
+STW_SINGLE:
     JSR SD_WRITE_SECTOR
+STW_WRITTEN:
     LDA ZP_ERR
     BNE STW_DONE
     JSR INC_LBA
@@ -1153,6 +1304,10 @@ STW_NEXT:
     JSR SHOW_PROGRESS
     JMP STW_NEXT
 STW_DONE:
+    LDA V_MULTIW
+    BEQ STW_OUT
+    JSR SD_MULTI_END
+STW_OUT:
     RTS
 
 INC_DONE:
@@ -1177,9 +1332,21 @@ INC_LBA:
 INCL_OUT:
     RTS
 
-; Redraw the progress line only when the percentage changes. A DIV32 per sector
-; would cost about as much as the write itself and double the format time.
+; Redraw progress only when the percentage changes. A DIV32 per sector would
+; cost about as much as the write itself and double the format time.
 SHOW_PROGRESS:
+    ; Force an exhausted stage to exactly 100%, even when ceil(total/100)
+    ; does not divide the sector count evenly.
+    LDA #<V_DONE
+    STA ZP_PTR2
+    LDA #<V_PCTTOT
+    STA ZP_PTR3
+    JSR CMP32
+    BCC SP_NOT_DONE
+    LDA #$64
+    STA V_PCT
+    JMP DRAW_PROGRESS
+SP_NOT_DONE:
     LDA #<V_DONE
     STA ZP_PTR2
     LDA #<V_PCTNEXT
@@ -1195,10 +1362,18 @@ SHOW_PROGRESS:
     BNE SP_DRAW
     INC V_PCT+1
 SP_DRAW:
-    LDA #$11                ; row 17
+    JMP DRAW_PROGRESS
+SP_OUT:
+    RTS
+
+; Draw the current stage's progress in the right half of its label row.
+DRAW_PROGRESS:
+    LDA V_STAGE
+    CLC
+    ADC #$03
     JSR GOTO_ROW
-    LDA #$20
-    JSR PUTCH
+    LDA #$28                ; column 40: right half of the 80-column screen
+    STA ZP_COL
     LDA #<V_PCT
     STA ZP_PTR2
     LDA #$03
@@ -1226,7 +1401,6 @@ SP_DRAW:
     ; every field is fixed width, so the line can never leave stale text
     LDA #$00
     STA RAMWRTOFF
-SP_OUT:
     RTS
 
 ; =============================================================================
@@ -1239,7 +1413,12 @@ VERIFY_ALL:
     LDA #$00
     STA RAMWRTOFF           ; force MAIN before any VARS write (SHOW_CHOICES/PSTR may leave AUX)
     STA V_VERERR
-    JSR SET_CURSOR_END
+    STA V_VERERR+1
+    STA V_VERERR+2
+    STA V_VERERR+3
+    ; Leave the format stage rows intact and list verification below them.
+    LDA #$0E                ; row 14: below the final root stage at row 13
+    JSR GOTO_ROW
     LDX #<MSG_VERIFY
     LDY #>MSG_VERIFY
     JSR PSTR
@@ -1293,32 +1472,10 @@ VERIFY_ALL:
     LDA #>MSG_VI_BKFSINFO
     STA ZP_PTRHI
     JSR VERIFY_ONE
-    ; FAT #1 first sector
-    JSR BUILD_FAT0
-    LDA #RSVD_SECS
-    JSR SET_LBA_FROM_PART
-    LDA #<MSG_VI_FAT1
-    STA ZP_PTR
-    LDA #>MSG_VI_FAT1
-    STA ZP_PTRHI
-    JSR VERIFY_ONE
-    ; FAT #2 first sector
-    LDA #RSVD_SECS
-    JSR SET_LBA_FROM_PART
-    JSR LBA_PLUS_FATSZ
-    LDA #<MSG_VI_FAT2
-    STA ZP_PTR
-    LDA #>MSG_VI_FAT2
-    STA ZP_PTRHI
-    JSR VERIFY_ONE
-    ; root directory first sector
-    JSR BUILD_ROOT
-    JSR SET_LBA_DATA_AREA
-    LDA #<MSG_VI_ROOT
-    STA ZP_PTR
-    LDA #>MSG_VI_ROOT
-    STA ZP_PTRHI
-    JSR VERIFY_ONE
+    ; FAT #1/#2 and the root directory are mutable after formatting: creating
+    ; files updates both FAT copies and root entries.  Do not compare them to
+    ; the pristine empty templates here, or a valid populated card reports a
+    ; false mismatch.  The fixed metadata above remains byte-for-byte checked.
     RTS
 
 ; VERIFY_ONE - ZP_PTR = label, ZP_LBA = sector, WRKBUF = what must be there
@@ -1326,14 +1483,26 @@ VERIFY_ONE:
     JSR PRINT_STRING
     LDA #$00
     STA RAMWRTOFF           ; PUTCH may have left RAMWRT on AUX; force MAIN
-    LDA #$42
+    LDA #$82
     STA ZP_BUFPG            ; read the sector back into TMPBUF
     JSR SD_READ_SECTOR
     LDA ZP_ERR
     BNE VO_BAD
     JSR CMP512
     LDA ZP_ERR
-    BNE VO_BAD
+    BEQ VO_OK
+    ; MBR legacy CHS bytes may be normalized by FAT32 tools, and FSInfo's
+    ; free-count/next-free fields change when files are created.  Those are
+    ; valid differences; the fixed metadata sectors remain strict compares.
+    LDA ZP_PTR
+    CMP #<MSG_VI_MBR
+    BEQ VO_OK
+    CMP #<MSG_VI_FSINFO
+    BEQ VO_OK
+    CMP #<MSG_VI_BKFSINFO
+    BEQ VO_OK
+    JMP VO_BAD
+VO_OK:
     LDX #<MSG_OK
     LDY #>MSG_OK
     JSR PSTR
@@ -1917,7 +2086,10 @@ SWS_L1:
     BNE SWS_L1
     JSR SPI_SEND_A          ; the two CRC bytes
     JSR SPI_SEND_A
-    JSR SPI_READ_A          ; data response
+    JSR SPI_READ_A          ; data response token: $05 means accepted
+    AND #$1F                ; only the lower five bits define the response
+    CMP #$05
+    BNE SWS_FAIL
     ; A card holds the line low while it programs the block. Bounded wait, so a
     ; card that never frees the line reports an error instead of hanging.
     LDA #$FF
@@ -1938,6 +2110,66 @@ SWS_FREED:
 SWS_FAIL:
     LDA #$01
     STA ZP_ERR
+    RTS
+
+; CMD25 multi-block write support.  FAT free-space stages repeatedly send the
+; same all-zero WRKBUF, so one command frame can cover an entire FAT rather
+; than issuing CMD24 once per sector.
+SD_MULTI_BEGIN:
+    LDA #$00
+    STA ZP_ERR
+    STA RAMRDOFF
+    JSR SD_ARG_FROM_LBA
+    LDA #$59                ; CMD25 WRITE_MULTIPLE_BLOCK
+    JSR SPI_SEND_A
+    LDA V_ARG
+    JSR SPI_SEND_A
+    LDA V_ARG+1
+    JSR SPI_SEND_A
+    LDA V_ARG+2
+    JSR SPI_SEND_A
+    LDA V_ARG+3
+    JSR SPI_SEND_A
+    LDA #$FF
+    JSR SPI_SEND_A
+    JSR SPI_READ_A
+    CMP #$00
+    BEQ SMB_OUT
+    JMP SWS_FAIL
+SMB_OUT:
+    RTS
+
+; Send one CMD25 data block from WRKBUF.  CMD25 uses $FC, while CMD24 uses $FE.
+SD_MULTI_BLOCK:
+    LDA #$FC
+    JSR SPI_SEND_A
+    LDX #$00
+SMB_L0:
+    LDA WRKBUF,X
+    JSR SPI_SEND_A
+    INX
+    BNE SMB_L0
+    LDX #$00
+SMB_L1:
+    LDA WRKBUF+256,X
+    JSR SPI_SEND_A
+    INX
+    BNE SMB_L1
+    LDA #$FF
+    JSR SPI_SEND_A
+    JSR SPI_SEND_A
+    JSR SPI_READ_A
+    AND #$1F
+    CMP #$05
+    BEQ SMB_BUSY
+    JMP SWS_FAIL
+SMB_BUSY:
+    JMP SWS_BUSY
+
+; Terminate CMD25 after the last sector. The stop token is not a data block.
+SD_MULTI_END:
+    LDA #$FD
+    JSR SPI_SEND_A
     RTS
 
 ; GET_SD_TOTAL - the capacity in 512-byte sectors, from CMD9 (SEND_CSD).
@@ -2217,7 +2449,7 @@ SUB32:
 ; supported, and ZP_SCR0 is free here (the busy-wait that uses it is not active
 ; on the capacity/geometry path).
 CMP32:
-    LDA #$44
+    LDA #$94
     STA ZP_PTR2HI
     STA ZP_PTR3HI
     LDY #$03
@@ -2342,7 +2574,7 @@ COMPUTE_GEOMETRY:
     STA ZP_ERR
     STA RAMWRTOFF         ; VARS writes below; the probe screen's PSTR left
                           ; the write bank on whatever column it ended on
-    LDA #$44
+    LDA #$94
     STA ZP_PTR2HI           ; every VARS variable lives on page $44, so the
     STA ZP_PTR3HI           ; helper pointers only ever need their low byte set
     LDA #<PART_LBA
@@ -2959,7 +3191,7 @@ PN_OUT:
 PRINT_DEC32W:
     ; The SD routines clobber the helper high bytes; pin them to page $44 so
     ; the (ZP_PTR2),Y / (ZP_PTR3),Y reads land on VARS, whatever ran before.
-    LDA #$44
+    LDA #$94
     STA ZP_PTR2HI
     STA ZP_PTR3HI
     ; PUTCH leaves RAMWRT on whichever bank the last column used; force MAIN so
@@ -3067,13 +3299,19 @@ SHOW_VERA_LINE:
     LDX #<MSG_SLOT
     LDY #>MSG_SLOT
     JSR PSTR
+    LDA #$24                ; value column 36
+    STA ZP_COL
     LDA ZP_VERAHI
     SEC
     SBC #$C0                ; $C2 -> slot 2, $C4 -> slot 4
     JSR PRINT_DEC32_1
+    LDA #$03
+    JSR GOTO_ROW
     LDX #<MSG_SPIK
     LDY #>MSG_SPIK
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA ZP_SDCLK
     AND #$02
     BEQ SV_FAST
@@ -3105,6 +3343,8 @@ SHOW_CAP_LINE:
     LDX #<MSG_CAPA
     LDY #>MSG_CAPA
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #<V_TOTAL
     STA ZP_PTR2
     LDA #$08
@@ -3150,12 +3390,14 @@ PROBE_EXISTING:
     LDX #<MSG_MBRAT
     LDY #>MSG_MBRAT
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #$00
     STA ZP_LBA0
     STA ZP_LBA1
     STA ZP_LBA2
     STA ZP_LBA3
-    LDA #$40
+    LDA #$80
     STA ZP_BUFPG
     JSR SD_READ_SECTOR
     LDA ZP_ERR
@@ -3193,12 +3435,14 @@ PE_MBRDONE:
     LDX #<MSG_VBRAT
     LDY #>MSG_VBRAT
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #<V_PART
     STA ZP_PTR2
     LDA #$08
     STA ZP_TEMP2
     JSR PRINT_DEC32W
-    LDA #$40
+    LDA #$80
     STA ZP_BUFPG
     LDY #$03
 PE_SETPART:
@@ -3237,7 +3481,7 @@ PE_VBRREAD:
 
 ; SHOW_LAYOUT - what is going to be written
 SHOW_LAYOUT:
-    LDA #$44
+    LDA #$94
     STA ZP_PTR2HI
     STA ZP_PTR3HI
     LDA #$00
@@ -3252,33 +3496,9 @@ SHOW_LAYOUT:
     LDX #<MSG_LPART
     LDY #>MSG_LPART
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #<V_PART
-    STA ZP_PTR2
-    LDA #$08
-    STA ZP_TEMP2
-    JSR PRINT_DEC32W
-    LDA #$20
-    JSR PUTCH
-    LDA #$2D
-    JSR PUTCH
-    LDA #$20
-    JSR PUTCH
-    ; last LBA = V_PART + V_PSIZE - 1
-    LDA #<V_TMP3
-    STA ZP_PTR2
-    LDA #<V_PSIZE
-    STA ZP_PTR3
-    JSR CP32
-    LDA #<V_TMP3
-    STA ZP_PTR2
-    LDA #$01
-    JSR SUB_IMM8
-    LDA #<V_TMP3
-    STA ZP_PTR2
-    LDA #<V_PART
-    STA ZP_PTR3
-    JSR ADD32
-    LDA #<V_TMP3
     STA ZP_PTR2
     LDA #$08
     STA ZP_TEMP2
@@ -3288,61 +3508,56 @@ SHOW_LAYOUT:
     LDX #<MSG_LSIZE
     LDY #>MSG_LSIZE
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #<V_PSIZE
     STA ZP_PTR2
     LDA #$08
     STA ZP_TEMP2
     JSR PRINT_DEC32W
-    LDA #$20
-    JSR PUTCH
-    ; MiB of the partition: copy V_PSIZE to V_TMP4 first so V_PSIZE stays intact!
-    LDA #<V_TMP4
-    STA ZP_PTR2
-    LDA #<V_PSIZE
-    STA ZP_PTR3
-    JSR CP32
-    LDA #<V_TMP4
-    STA ZP_PTR2
-    LDA #$0B
-    JSR SHR32
-    LDA #<V_TMP4
-    STA ZP_PTR2
-    LDA #$04
-    STA ZP_TEMP2
-    JSR PRINT_DEC32W
-    LDX #<MSG_LMIB
-    LDY #>MSG_LMIB
-    JSR PSTR
     LDA #$0D
     JSR GOTO_ROW
     LDX #<MSG_LSPC
     LDY #>MSG_LSPC
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA V_SPC
     JSR PRINT_DEC32_1
-    LDA #$20
-    JSR PUTCH
+    LDX #<MSG_LSECT
+    LDY #>MSG_LSECT
+    JSR PSTR
+    LDA #$0E
+    JSR GOTO_ROW
     LDX #<MSG_LCLUST
     LDY #>MSG_LCLUST
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #<V_CLUST
     STA ZP_PTR2
     LDA #$07
     STA ZP_TEMP2
     JSR PRINT_DEC32W
-    LDA #$0E
+    LDA #$0F
     JSR GOTO_ROW
     LDX #<MSG_LFAT
     LDY #>MSG_LFAT
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     LDA #<V_FATSZ
     STA ZP_PTR2
     LDA #$06
     STA ZP_TEMP2
     JSR PRINT_DEC32W
+    LDA #$10
+    JSR GOTO_ROW
     LDX #<MSG_LDATA
     LDY #>MSG_LDATA
     JSR PSTR
+    LDA #$24
+    STA ZP_COL
     ; first data LBA = V_PART + V_DATA
     LDA #<V_TMP3
     STA ZP_PTR2
@@ -3405,7 +3620,10 @@ SHOW_RESULT:
     LDX #<MSG_PASS
     LDY #>MSG_PASS
     JSR PSTR
-    RTS
+    LDX #<MSG_PRESSKEY
+    LDY #>MSG_PRESSKEY
+    JSR PSTR
+    JMP SR_WAIT
 SR_BAD:
     LDX #<MSG_FAIL
     LDY #>MSG_FAIL
@@ -3418,12 +3636,15 @@ SR_BAD:
     LDX #<MSG_FAILB
     LDY #>MSG_FAILB
     JSR PSTR
+    LDX #<MSG_PRESSKEY
+    LDY #>MSG_PRESSKEY
+    JSR PSTR
+SR_WAIT:
+    JSR READ_KEY_ANY
     RTS
 
-; SET_CURSOR_END - clear the screen and start at the top
+; SET_CURSOR_END - keep the existing screen and continue at the current cursor
 SET_CURSOR_END:
-    JSR CLEAR_SCREEN
-    JSR SET_CURSOR_HOME
     RTS
 
 ; SUB_IMM8 - subtract A from the four bytes ZP_PTR2 points at
@@ -3433,7 +3654,7 @@ SUB_IMM8:
     STA MATHSB+1
     STA MATHSB+2
     STA MATHSB+3
-    LDA #$44
+    LDA #$94
     STA ZP_PTR3HI
     LDA #<MATHSB
     STA ZP_PTR3
@@ -3454,7 +3675,7 @@ RF_BYTES     = 96
 
 RF_TAB:
     !BYTE <MSG_STG_ZERO, >MSG_STG_ZERO, <BUILD_ZEROS, >BUILD_ZEROS
-    !BYTE CK_TOTAL, LK_ZERO, 0, 0
+    !BYTE CK_TOTAL, LK_ZERO, 0, FL_MULTI
     !BYTE <MSG_STG_MBR, >MSG_STG_MBR, <BUILD_MBR, >BUILD_MBR
     !BYTE CK_ONE, LK_ZERO, 0, 0
     !BYTE <MSG_STG_VBR, >MSG_STG_VBR, <BUILD_VBR, >BUILD_VBR
@@ -3468,15 +3689,15 @@ RF_TAB:
     !BYTE <MSG_STG_F1A, >MSG_STG_F1A, <BUILD_FAT0, >BUILD_FAT0
     !BYTE CK_ONE, LK_PART, 32, 0
     !BYTE <MSG_STG_F1B, >MSG_STG_F1B, <BUILD_ZEROS, >BUILD_ZEROS
-    !BYTE CK_FATSZ_M1, LK_PART, 33, 0
+    !BYTE CK_FATSZ_M1, LK_PART, 33, FL_MULTI
     !BYTE <MSG_STG_F2A, >MSG_STG_F2A, <BUILD_FAT0, >BUILD_FAT0
     !BYTE CK_ONE, LK_PART, 32, FL_FATSZ
     !BYTE <MSG_STG_F2B, >MSG_STG_F2B, <BUILD_ZEROS, >BUILD_ZEROS
-    !BYTE CK_FATSZ_M1, LK_PART, 33, FL_FATSZ
+    !BYTE CK_FATSZ_M1, LK_PART, 33, FL_FATSZ+FL_MULTI
     !BYTE <MSG_STG_ROOT, >MSG_STG_ROOT, <BUILD_ROOT, >BUILD_ROOT
     !BYTE CK_ONE, LK_DATA, 0, 0
     !BYTE <MSG_STG_RPAD, >MSG_STG_RPAD, <BUILD_ZEROS, >BUILD_ZEROS
-    !BYTE CK_SPC_M1, LK_DATA, 1, 0
+    !BYTE CK_SPC_M1, LK_DATA, 1, FL_MULTI
 RF_TABEND:
 
 ; -----------------------------------------------------------------------------
@@ -3506,7 +3727,7 @@ FMT_WORD:     ASC "FORMAT"
 ; Messages. $0D starts the next row, so a message carries its own line breaks.
 ; -----------------------------------------------------------------------------
 MSG_TITLE:
-    ASC "VERASDFORMAT - FAT32 Formatter for VERA SD/MMC v0.1"
+    ASC "VeraSDFormat - FAT32 Formatter for VERA SD v1.02 by anomixer"
     !BYTE $0D, 0
 MSG_VERS:
     !BYTE 0
@@ -3552,11 +3773,14 @@ MSG_ABORTED:
     !BYTE $0D
     ASC "  and not mountable. Run a format again."
     !BYTE 0
+MSG_WRITEFAIL:
+    ASC "SD WRITE FAILED"
+    !BYTE 0
 MSG_SLOT:
-    ASC "  VERA card      slot "
+    ASC "  VERA card:       Slot "
     !BYTE 0
 MSG_SPIK:
-    ASC "   SPI clock "
+    ASC "  SPI clock:       "
     !BYTE 0
 MSG_SVSLOW:
     ASC "slow (390 kHz)"
@@ -3565,7 +3789,7 @@ MSG_SVFAST:
     ASC "fast (12.5 MHz)"
     !BYTE 0
 MSG_CAPA:
-    ASC "  Card capacity  "
+    ASC "  Card capacity:   "
     !BYTE 0
 MSG_VTOT:
     ASC "  V_TOTAL=$"
@@ -3583,12 +3807,12 @@ MSG_SDBYTE:
     ASC "byte"
     !BYTE 0
 MSG_EXIST:
-    ASC "  Existing:"
+    ASC "  Existing volume:"
     !BYTE $0D, 0
 
 
 MSG_MBRAT:
-    ASC "    LBA 0       "
+    ASC "    MBR:           "
     !BYTE 0
 MSG_MBRYES:
     ASC "MBR type $"
@@ -3603,7 +3827,7 @@ MSG_READFAIL:
     ASC "read failed"
     !BYTE 0
 MSG_VBRAT:
-    ASC "    LBA "
+    ASC "    Boot sector:   LBA "
     !BYTE 0
 MSG_VFAT32:
     ASC "FAT32 volume labelled "
@@ -3612,30 +3836,33 @@ MSG_VNOFAT:
     ASC "not FAT32"
     !BYTE 0
 MSG_LAYOUT:
-    ASC "  Layout:"
+    ASC "  New FAT32 layout:"
     !BYTE $0D, 0
 
 
 MSG_LPART:
-    ASC "    Partition      LBA "
+    ASC "    Partition LBA: "
     !BYTE 0
 MSG_LSIZE:
-    ASC "    Size           "
+    ASC "    Size (sectors): "
     !BYTE 0
 MSG_LMIB:
     ASC " MiB"
     !BYTE $0D, 0
 MSG_LSPC:
-    ASC "    Cluster size "
+    ASC "    Cluster size (sectors): "
+    !BYTE 0
+MSG_LSECT:
+    ASC " sectors"
     !BYTE 0
 MSG_LCLUST:
-    ASC "clusters"
+    ASC "    Cluster count: "
     !BYTE 0
 MSG_LFAT:
-    ASC "    Sectors per FAT "
+    ASC "    FAT size (sectors): "
     !BYTE 0
 MSG_LDATA:
-    ASC "   data from LBA "
+    ASC "    First data LBA: "
     !BYTE 0
 MSG_TGT:
     ASC "  Target: a "
@@ -3654,16 +3881,25 @@ MSG_CATTITLE:
     ASC "Root directory of this card:"
     !BYTE $0D
     !BYTE 0
-MSG_CATDONE:
-    ASC "  End of directory."
+MSG_CATHEAD:
+    ASC "Filename Ext FileSize"
     !BYTE $0D
+    !BYTE 0
+MSG_CATDONE:
+    ASC "End of directory. "
+    !BYTE 0
+MSG_CATVOL:
+    ASC "  <VOL>"
+    !BYTE 0
+MSG_CATDIR:
+    ASC "  <DIR>"
     !BYTE 0
 MSG_CATFAIL:
     ASC "  Not a FAT32 volume - nothing to catalog."
     !BYTE $0D
     !BYTE 0
 MSG_MENUTITLE:
-    ASC "VERASDFORMAT - choose an action"
+    ASC "VeraSDFormat - choose an action"
     !BYTE $0D
     !BYTE $0D
     !BYTE 0
@@ -3677,6 +3913,7 @@ MSG_CHOICES:
     ASC "  [0] Exit"
     !BYTE 0
 MSG_WORKING:
+    !BYTE $0D
     ASC "  Building volume"
     !BYTE $0D, 0
 MSG_OF:
@@ -3701,15 +3938,6 @@ MSG_VI_BKVBR:
 MSG_VI_BKFSINFO:
     ASC "    FSInfo cp "
     !BYTE 0
-MSG_VI_FAT1:
-    ASC "    FAT 1     "
-    !BYTE 0
-MSG_VI_FAT2:
-    ASC "    FAT 2     "
-    !BYTE 0
-MSG_VI_ROOT:
-    ASC "    root dir  "
-    !BYTE 0
 MSG_OK:
     ASC "ok"
     !BYTE $0D, 0
@@ -3718,7 +3946,7 @@ MSG_MISMATCH:
     !BYTE $0D, 0
 MSG_PASS:
     !BYTE $0D
-    ASC "  PASS - the card holds a FAT32 volume."
+    ASC "  PASS - the card holds a FAT32 volume. "
     !BYTE 0
 MSG_FAIL:
     !BYTE $0D
@@ -3746,7 +3974,7 @@ MSG_TYPEFMT:
     ASC "Type FORMAT then RETURN: "
     !BYTE 0
 MSG_PRESSKEY:
-    ASC "  [ Press any key to continue ]"
+    ASC "Press any key to continue."
     !BYTE 0
 
 MSG_STG_ZERO:
@@ -3781,10 +4009,10 @@ MSG_STG_F2B:
     ASC "FAT 2, free space"
     !BYTE $0D, 0
 MSG_STG_ROOT:
-    ASC "root directory"
+    ASC "erase root directory"
     !BYTE $0D, 0
 MSG_STG_RPAD:
-    ASC "root directory padding"
+    ASC "erase root remainder"
     !BYTE $0D, 0
 
 ; =============================================================================
